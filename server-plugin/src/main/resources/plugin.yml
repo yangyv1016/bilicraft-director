@@ -1,0 +1,25 @@
+name: BiliCraftAI
+prefix: BiliCraft 导播服务
+version: '${version}'
+main: dev.bilicraft.ai.server.DirectorPlugin
+api-version: '1.21.11'
+description: BiliCraft 导播服务：候选场景、数据权限与玩家观察隐私管理
+authors: [BiliCraft]
+softdepend: [LuckPerms]
+commands:
+  aiview:
+    description: 管理导播观察偏好、黑名单与世界允许名单
+    usage: /aiview stop | blacklist on/off | status
+permissions:
+  bilicraftai.data.read:
+    description: 允许当前已登录账号通过游戏连接读取摄影机数据并申请观察
+    default: false
+  bilicraftai.blacklist.manage:
+    description: 允许管理员为指定玩家添加或移除长期观察黑名单
+    default: op
+  bilicraftai.worlds.manage:
+    description: 允许管理员查看、添加或移除导播世界允许名单
+    default: op
+  bilicraftai.map.manage:
+    description: 允许管理员配置、查看或清除客户端直连的 Dynmap 外链映射
+    default: op

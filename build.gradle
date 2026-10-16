@@ -1,0 +1,35 @@
+plugins {
+    id 'base'
+}
+
+allprojects {
+    group = 'dev.bilicraft.ai'
+    version = '0.1.0'
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    plugins.withId('java') {
+        java {
+            toolchain.languageVersion = JavaLanguageVersion.of(21)
+            withSourcesJar()
+        }
+        tasks.withType(JavaCompile).configureEach {
+            options.encoding = 'UTF-8'
+            options.release = 21
+        }
+        tasks.withType(Test).configureEach {
+            useJUnitPlatform()
+            testLogging { events 'failed', 'skipped' }
+        }
+    }
+}
+
+tasks.register('release', Sync) {
+    dependsOn ':client-mod:remapJar', ':server-plugin:jar'
+    from(project(':client-mod').tasks.named('remapJar'))
+    from(project(':server-plugin').tasks.named('jar'))
+    into layout.buildDirectory.dir('release')
+}

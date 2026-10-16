@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="color-scheme" content="dark">
+        <meta name="referrer" content="no-referrer">
+        <title>BiliCraft 导播 · 本地中控</title>
+        <link rel="icon" href="data:,">
+        <link rel="stylesheet" href="/style.css">
+        <script src="/app.js" defer>
+        </script>
+    </head>
+    <body>
+        <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <symbol id="i-grid" viewBox="0 0 24 24">
+                <rect x="3" y="3" width="7" height="7" rx="1"/>
+                <rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/>
+                <rect x="14" y="14" width="7" height="7" rx="1"/>
+            </symbol>
+            <symbol id="i-ai" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="3"/>
+                <path d="M9 1v5m6-5v5M9 18v5m6-5v5M1 9h5m-5 6h5m12-6h5m-5 6h5M10 10h4v4h-4z"/>
+            </symbol>
+            <symbol id="i-search" viewBox="0 0 24 24">
+                <circle cx="10" cy="10" r="6.5"/>
+                <path d="m15 15 6 6"/>
+            </symbol>
+            <symbol id="i-play" viewBox="0 0 24 24">
+                <path d="m8 5 11 7-11 7z"/>
+            </symbol>
+            <symbol id="i-stop" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="1"/>
+            </symbol>
+            <symbol id="i-prev" viewBox="0 0 24 24">
+                <path d="m15 5-7 7 7 7"/>
+            </symbol>
+            <symbol id="i-next" viewBox="0 0 24 24">
+                <path d="m9 5 7 7-7 7"/>
+            </symbol>
+            <symbol id="i-refresh" viewBox="0 0 24 24">
+                <path d="M20 11a8 8 0 1 0-2.3 6.7M20 4v7h-7"/>
+            </symbol>
+            <symbol id="i-focus" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="6"/>
+                <path d="M12 2v5m0 10v5M2 12h5m10 0h5"/>
+            </symbol>
+            <symbol id="i-panel" viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="16" rx="2"/>
+                <path d="M9 4v16"/>
+            </symbol>
+            <symbol id="i-external" viewBox="0 0 24 24">
+                <path d="M14 3h7v7m0-7L10 14M10 3H4v17h17v-6"/>
+            </symbol>
+        </svg>
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand-mark">B<span>·</span>
+                </span>
+                <div>
+                    <strong>BiliCraft 导播</strong>
+                    <span class="eyebrow">本地中控台</span>
+                </div>
+            </div>
+            <div id="accountInfo" class="account-info" aria-label="当前 Minecraft 账户">
+                <div class="account-avatar">
+                    <img id="accountAvatar" alt="当前账户头像" hidden>
+                    <span id="accountFallback" aria-hidden="true">?</span>
+                </div>
+                <div class="account-text">
+                    <strong id="accountName">未登录 Minecraft</strong>
+                    <span id="accountDetail">等待客户端账户</span>
+                </div>
+            </div>
+            <div class="connection-block">
+                <span id="connectionBadge" class="badge offline">
+                    <i>
+                    </i>
+                    <span id="connectionText">正在连接</span>
+                </span>
+                <span id="serverText" class="server-label">等待客户端</span>
+            </div>
+            <div class="primary-actions" aria-label="导播控制">
+                <button class="button start" id="startButton" data-command="start" disabled>
+                    <svg>
+                        <use href="#i-play"/>
+                    </svg>启动导播</button>
+                <button class="button stop" id="stopButton" data-command="stop" disabled>
+                    <svg>
+                        <use href="#i-stop"/>
+                    </svg>停止</button>
+                <span class="action-separator">
+                </span>
+                <button class="button" data-command="previous" title="选择上一素材并立即插播，不回退待播队列" disabled>
+                    <svg>
+                        <use href="#i-prev"/>
+                    </svg>
+                    <span>上一素材</span>
+                </button>
+                <button class="button" data-command="queueSkip" disabled>
+                    <span>跳过当前</span>
+                    <svg>
+                        <use href="#i-next"/>
+                    </svg>
+                </button>
+                <button class="button" id="refreshButton" data-command="refresh" disabled>
+                    <svg>
+                        <use href="#i-refresh"/>
+                    </svg>
+                    <span>拉取目标</span>
+                </button>
+                <button class="button" id="mapRefreshButton" data-command="mapRefresh" title="由客户端直连当前世界已配置的地图外链，手动导入标记与区域" disabled>
+                    <svg><use href="#i-refresh"/></svg>
+                    <span>拉取地图</span>
+                </button>
+            </div>
+            <span id="lastUpdate" class="last-update">尚未同步</span>
+        </header>
+        <div class="app-body">
+            <nav class="rail" aria-label="主导航">
+                <button class="nav-button active" id="workspaceTab" aria-selected="true">
+                    <svg>
+                        <use href="#i-grid"/>
+                    </svg>
+                    <span>工作台</span>
+                </button>
+                <button class="nav-button" id="settingsTab" aria-selected="false">
+                    <svg>
+                        <use href="#i-ai"/>
+                    </svg>
+                    <span>配置</span>
+                </button>
+                <div class="rail-bottom">
+                    <span class="local-dot">
+                    </span>
+                    <span>本机</span>
+                </div>
+            </nav>
+            <main class="main-area">
+                <section id="workView" class="work-view" aria-label="导播工作台">
+                    <aside class="inspector" aria-label="待播队列与素材操作">
+                        <div class="panel-heading">
+                            <h2>播出队列</h2>
+                            <span id="runState" class="badge">待启动</span>
+                            <button class="icon-button close-inspector" id="closeInspector" aria-label="关闭左侧播出队列">×</button>
+                        </div>
+                        <section class="pending-section">
+                            <div class="section-label">待播列表 <span id="queueCapacity">0 / 64</span>
+                            </div>
+                            <p id="queueStatus" class="field-help">等待客户端队列</p>
+                            <div id="pendingQueue" class="pending-queue" role="list" aria-label="待播顺序">
+                            </div>
+                            <div class="queue-summary">
+                                <span id="queueAutoSummary">等待配置</span>
+                                <button id="editQueueSettings" class="text-button">设置</button>
+                            </div>
+                        </section>
+                        <section class="inspector-section selection-section">
+                            <div class="section-label">选中目标 <span id="selectionKind">—</span>
+                            </div>
+                            <h3 id="selectionName">选择一个展示目标</h3>
+                            <p id="selectionDescription" class="muted">从素材库或位置图选择，再加入队列。</p>
+                            <dl class="details-grid">
+                                <dt>世界</dt>
+                                <dd id="selectionWorld">—</dd>
+                                <dt>位置</dt>
+                                <dd id="selectionCoordinates">—</dd>
+                                <dt>路径半径</dt>
+                                <dd id="selectionRadius">—</dd>
+                            </dl>
+                            <div class="entry-duration-row">
+                                <label for="entryDuration">此项时长</label>
+                                <input id="entryDuration" type="number" min="30" max="600" step="1" value="120" required>
+                                <span id="entryDurationUnit">秒</span>
+                            </div>
+                            <button id="queueAppend" class="button accent wide" disabled>加入队尾</button>
+                            <div class="selection-actions">
+                                <button id="queueNext" class="button" disabled>插到下一项</button>
+                                <button id="showSelected" class="button" disabled>立即插播</button>
+                            </div>
+                            <form id="queueInsertForm" class="queue-insert-form">
+                                <label for="queuePosition">待播位置</label>
+                                <input id="queuePosition" type="number" min="1" max="1" step="1" required value="1">
+                                <button id="queueInsert" class="button compact" type="submit" disabled>插入</button>
+                            </form>
+                            <p id="selectionStatus" class="field-help">玩家目标始终经过 15 秒私密预告。</p>
+                        </section>
+                        <section class="inspector-section runtime-section">
+                            <div class="section-label">正在执行</div>
+                            <div id="runtimeStatus" class="runtime-status">等待客户端状态</div>
+                            <dl class="details-grid">
+                                <dt>玩家观察</dt>
+                                <dd id="observationState">未进行</dd>
+                                <dt>剩余时间</dt>
+                                <dd id="observationCountdown">—</dd>
+                                <dt>镜头移动</dt>
+                                <dd id="motionState">—</dd>
+                            </dl>
+                        </section>
+                        <section class="inspector-section capability-section">
+                            <div class="section-label">接入状态</div>
+                            <div>
+                                <span>Dynmap 导入</span>
+                                <span id="mapCapability">等待同步</span>
+                            </div>
+                            <div>
+                                <span>热力采集</span>
+                                <span id="heatCapability">未启用</span>
+                            </div>
+                            <div>
+                                <span>本地自动补足</span>
+                                <span>场景优先</span>
+                            </div>
+                            <div>
+                                <span>AI 策略调用</span>
+                                <span id="aiCapability">等待同步</span>
+                            </div>
+                            <div>
+                                <span>区域传送</span>
+                                <span id="teleportCapability">待接入</span>
+                            </div>
+                        </section>
+                    </aside>
+                    <section class="map-workspace" aria-labelledby="mapTitle">
+                        <div class="map-toolbar">
+                            <div class="map-title">
+                                <button class="icon-button inspector-toggle" id="openInspector" aria-label="打开左侧播出队列">
+                                    <svg>
+                                        <use href="#i-panel"/>
+                                    </svg>
+                                </button>
+                                <h2 id="mapTitle">位置工作区</h2>
+                                <span id="mapWorldLabel" class="world-label">未进入世界</span>
+                            </div>
+                            <div class="map-tools">
+                                <button class="icon-button" id="zoomOut" aria-label="缩小">−</button>
+                                <button class="icon-button" id="zoomIn" aria-label="放大">＋</button>
+                                <button class="button compact" id="centerCamera">
+                                    <svg>
+                                        <use href="#i-focus"/>
+                                    </svg>回摄影机</button>
+                                <button id="openLibrary" class="icon-button library-toggle" aria-label="打开右侧素材库">
+                                    <svg>
+                                        <use href="#i-panel"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="broadcast-strip" aria-label="当前播出与下一项">
+                            <section class="on-air-block">
+                                <div class="broadcast-eyebrow">
+                                    <span class="on-air-indicator">
+                                    </span>
+                                    <span id="currentEntryLabel">当前播出</span>
+                                    <span id="currentEntrySource" class="source-tag">—</span>
+                                </div>
+                                <h2 id="currentEntryName">暂无播出项</h2>
+                                <div class="broadcast-meta">
+                                    <span id="currentEntryKind">本地控制</span>
+                                    <span id="currentEntryTime">—</span>
+                                </div>
+                                <progress id="currentEntryProgress" class="broadcast-progress" max="100" value="0" aria-label="当前播出项进度">
+                                </progress>
+                                <div class="duration-adjustments" aria-label="调整当前播出时长">
+                                    <button class="duration-adjust" type="button" data-duration-card="current" data-delta-seconds="-10" aria-label="当前播出减少10秒" title="当前播出减少10秒，不低于30秒总时长" disabled>−10 秒</button>
+                                    <button class="duration-adjust" type="button" data-duration-card="current" data-delta-seconds="10" aria-label="当前播出增加10秒" title="当前播出增加10秒，不超过600秒总时长" disabled>+10 秒</button>
+                                    <span id="currentDurationHint" class="duration-hint">暂无可调场景</span>
+                                </div>
+                            </section>
+                            <section class="up-next-block">
+                                <div class="broadcast-eyebrow">下一项 <span id="pendingCount" class="count">0</span>
+                                </div>
+                                <h3 id="nextEntryName">等待队列</h3>
+                                <p id="nextEntryMeta">从素材库添加，或启用自动补足</p>
+                                <div class="duration-adjustments" aria-label="调整下一项时长">
+                                    <button class="duration-adjust" type="button" data-duration-card="next" data-delta-seconds="-10" aria-label="下一项减少10秒" title="下一项减少10秒，不低于30秒；不会自动开播" disabled>−10 秒</button>
+                                    <button class="duration-adjust" type="button" data-duration-card="next" data-delta-seconds="10" aria-label="下一项增加10秒" title="下一项增加10秒，不超过600秒；不会自动开播" disabled>+10 秒</button>
+                                    <span id="nextDurationHint" class="duration-hint">暂无可调场景</span>
+                                </div>
+                                <button class="text-button" id="openQueueSettings">调整队列配置 →</button>
+                            </section>
+                        </div>
+                        <section class="live-camera-panel" aria-label="实时运镜">
+                            <div class="live-camera-heading">
+                                <strong>实时运镜</strong>
+                                <select id="liveCameraMode" aria-label="实时运镜模式" disabled>
+                                    <option value="AUTO">自动巡游</option>
+                                    <option value="FOLLOW">后侧跟拍</option>
+                                    <option value="ORBIT">环绕</option>
+                                    <option value="DOLLY">推进 / 拉远</option>
+                                    <option value="TRUCK">横移</option>
+                                    <option value="CRANE">升降</option>
+                                    <option value="PAN">摇镜</option>
+                                    <option value="STATIC">固定机位</option>
+                                </select>
+                                <span id="liveCameraStatus">等待本机同步</span>
+                                <button id="saveLiveCamera" class="button compact" disabled>保存当前运镜</button>
+                            </div>
+                            <div class="live-camera-sliders">
+                                <label>距离 <output id="liveRadiusValue">12 格</output><input id="liveRadius" data-camera-setting="radius" aria-label="实时镜头距离" type="range" min="6" max="24" step="0.5" value="12" disabled></label>
+                                <label>速度 <output id="liveSpeedValue">2.5 格/秒</output><input id="liveSpeed" data-camera-setting="speed" aria-label="实时移动速度" type="range" min="0.5" max="5" step="0.1" value="2.5" disabled></label>
+                                <label>高度 <output id="liveHeightOffsetValue">4 格</output><input id="liveHeightOffset" data-camera-setting="heightOffset" aria-label="实时机位高度" type="range" min="1" max="12" step="0.5" value="4" disabled></label>
+                                <label>幅度 <output id="liveMotionAmplitudeValue">8 格</output><input id="liveMotionAmplitude" data-camera-setting="motionAmplitude" aria-label="实时运动幅度" type="range" min="2" max="24" step="0.5" value="8" disabled></label>
+                                <label>转向 <output id="liveTurnRateDegreesPerSecondValue">30 度/秒</output><input id="liveTurnRateDegreesPerSecond" data-camera-setting="turnRateDegreesPerSecond" aria-label="实时转向速度" type="range" min="6" max="80" step="1" value="30" disabled></label>
+                            </div>
+                        </section>
+                        <div class="map-canvas-wrap" id="mapContainer">
+                            <canvas id="mapCanvas" role="img" aria-label="摄影机与展示目标的位置示意图">
+                            </canvas>
+                            <div class="map-caption">
+                                <span class="small-dot">
+                                </span>位置示意 · 非游戏画面</div>
+                            <div class="map-empty" id="mapEmpty">
+                                <strong>等待游戏位置</strong>
+                                <span>连接客户端后显示摄影机与现有目标</span>
+                            </div>
+                            <div class="map-help">拖动平移 · 滚轮缩放 · 点击选择目标</div>
+                            <a id="dynmapLink" class="dynmap-link" href="https://map.bilicraft.com/s2/hyperion/" target="_blank" rel="noopener noreferrer">打开 Dynmap<svg>
+                                    <use href="#i-external"/>
+                                </svg>
+                                <span>外部地图，尚未导入</span>
+                            </a>
+                        </div>
+                        <div class="map-footer">
+                            <div class="map-legend">
+                                <span>
+                                    <i class="legend-camera">
+                                    </i>摄影机</span>
+                                <span>
+                                    <i class="kind-dot viewpoint">
+                                    </i>观景点</span>
+                                <span>
+                                    <i class="kind-dot area">
+                                    </i>区域</span>
+                                <span>
+                                    <i class="kind-dot player">
+                                    </i>玩家</span>
+                            </div>
+                            <span id="cursorCoordinates" class="coordinates">X — · Z —</span>
+                            <button id="fitTargets" class="text-button">显示全部</button>
+                            <span id="mapScale" class="scale-label">—</span>
+                        </div>
+                    </section>
+                    <aside class="target-library" aria-labelledby="libraryTitle">
+                        <div class="panel-heading">
+                            <h1 id="libraryTitle">素材库</h1>
+                            <span id="targetCount" class="count">0</span>
+                            <button class="icon-button close-library" id="closeLibrary" aria-label="关闭右侧素材库">×</button>
+                        </div>
+                        <label class="search-box">
+                            <svg>
+                                <use href="#i-search"/>
+                            </svg>
+                            <input id="targetSearch" type="search" placeholder="搜索名称或世界" autocomplete="off" aria-label="搜索展示目标">
+                        </label>
+                        <div class="target-filters" aria-label="目标分类">
+                            <button class="active" data-kind="ALL" aria-pressed="true">全部</button>
+                            <button data-kind="VIEWPOINT" aria-pressed="false">观景点</button>
+                            <button data-kind="AREA" aria-pressed="false">区域</button>
+                            <button data-kind="PLAYER" aria-pressed="false">玩家</button>
+                        </div>
+                        <ul id="targetsList" class="targets-list" aria-label="展示目标列表">
+                        </ul>
+                        <div class="library-footer">
+                            <span id="targetSource">等待目标快照</span>
+                            <span>队首＝下一项 · 不打断当前</span>
+                        </div>
+                    </aside>
+                </section>
+                <section id="settingsView" class="settings-view" hidden aria-labelledby="settingsTitle">
+                    <header class="settings-page-heading">
+                        <div>
+                            <span class="eyebrow">CLIENT CONFIGURATION</span>
+                            <h1 id="settingsTitle">本机配置</h1>
+                            <p>所有已实现的本机设置集中在这里。编辑草稿独立保留，应用后由客户端保存。</p>
+                        </div>
+                        <span class="badge" id="settingsConnection">等待同步</span>
+                    </header>
+                    <nav class="settings-tabs" aria-label="配置分类">
+                        <button data-config-tab="camera" class="active" aria-pressed="true">运镜</button>
+                        <button data-config-tab="queue" aria-pressed="false">队列</button>
+                        <button data-config-tab="ai" aria-pressed="false">AI 提供方</button>
+                        <button data-config-tab="map" aria-pressed="false">地图数据</button>
+                        <button data-config-tab="rules" aria-pressed="false">规则与能力</button>
+                    </nav>
+                    <section id="cameraConfig" class="configuration-panel" aria-label="运镜配置">
+                        <div class="configuration-heading">
+                            <h2>运镜参数</h2>
+                            <p>选择镜头模式并调整构图。客户端负责平滑移动，场景机位受各自路径范围限制。</p>
+                        </div>
+                        <div class="configuration-columns">
+                            <section class="configuration-card camera-settings-card">
+                                <div class="section-label">镜头参数 <span id="cameraDraftStatus">已同步</span>
+                                </div>
+                                <form id="cameraForm">
+                                    <label class="slider-label" for="cameraMode">运镜模式</label>
+                                    <select id="cameraMode" class="camera-mode-select">
+                                        <option value="AUTO">自动 · 区域巡游 / 静止环绕 / 移动跟拍</option>
+                                        <option value="FOLLOW">跟拍 · 保持目标后侧机位</option>
+                                        <option value="ORBIT">环绕 · 围绕目标缓慢旋转</option>
+                                        <option value="DOLLY">推进 / 拉远 · 往返改变距离</option>
+                                        <option value="TRUCK">横移 · 沿目标侧面移动</option>
+                                        <option value="CRANE">升降 · 保持水平机位上下移动</option>
+                                        <option value="PAN">摇镜 · 固定机位左右扫视</option>
+                                        <option value="STATIC">固定机位 · 持续朝向目标</option>
+                                    </select>
+                                    <p id="cameraModeHelp" class="field-help camera-mode-help"></p>
+                                    <label class="slider-label" for="radiusRange">镜头距离 <span>格</span>
+                                    </label>
+                                    <div class="slider-control">
+                                        <input id="radiusRange" type="range" min="6" max="24" step="1" value="12">
+                                        <input id="radiusNumber" type="number" min="6" max="24" step="any" required value="12" aria-label="镜头距离数值">
+                                    </div>
+                                    <label class="slider-label" for="speedRange">移动速度 <span>格 / 秒</span>
+                                    </label>
+                                    <div class="slider-control">
+                                        <input id="speedRange" type="range" min="0.5" max="5" step="0.5" value="2.5">
+                                        <input id="speedNumber" type="number" min="0.5" max="5" step="any" required value="2.5" aria-label="移动速度数值">
+                                    </div>
+                                    <label class="slider-label" for="heightOffsetRange">机位高度偏移 <span>格</span></label>
+                                    <div class="slider-control">
+                                        <input id="heightOffsetRange" type="range" min="1" max="12" step="0.5" value="4">
+                                        <input id="heightOffsetNumber" type="number" min="1" max="12" step="any" required value="4" aria-label="机位高度偏移数值">
+                                    </div>
+                                    <label class="slider-label" for="motionAmplitudeRange">运动幅度 <span>格</span></label>
+                                    <div class="slider-control">
+                                        <input id="motionAmplitudeRange" type="range" min="2" max="24" step="1" value="8">
+                                        <input id="motionAmplitudeNumber" type="number" min="2" max="24" step="any" required value="8" aria-label="运动幅度数值">
+                                    </div>
+                                    <label class="slider-label" for="turnRateDegreesPerSecondRange">转向速度上限 <span>度 / 秒</span></label>
+                                    <div class="slider-control">
+                                        <input id="turnRateDegreesPerSecondRange" type="range" min="6" max="80" step="1" value="30">
+                                        <input id="turnRateDegreesPerSecondNumber" type="number" min="6" max="80" step="any" required value="30" aria-label="转向速度上限数值">
+                                    </div>
+                                    <div class="form-actions">
+                                        <button id="saveCamera" class="button" type="submit" disabled>应用并保存</button>
+                                        <button class="text-button" id="resetCamera" type="button">放弃草稿</button>
+                                    </div>
+                                </form>
+                                <p id="cameraActual" class="field-help">等待客户端参数</p>
+                                <p class="field-help">模式或距离改变后会平滑前往新机位；参数不会自动启动导播。</p>
+                            </section>
+                            <aside class="configuration-notes">
+                                <h3>应用范围</h3>
+                                <p>应用并保存后，由 Mod 的同一运镜入口执行。不会启动已经停止的导播。</p>
+                                <dl>
+                                    <dt>镜头距离</dt>
+                                    <dd>6–24 格，数值框支持小数；景点按路径半径收紧。</dd>
+                                    <dt>移动速度</dt>
+                                    <dd>0.5–5 格 / 秒</dd>
+                                    <dt>高度与运动幅度</dt>
+                                    <dd>高度偏移 1–12 格；幅度 2–24 格，用于推进、横移、升降、摇镜及自动区域巡游。路径范围不足时自动收紧。</dd>
+                                    <dt>转向速度</dt>
+                                    <dd>6–80 度 / 秒，越低转头越舒缓。移动速度与转头速度独立调整。</dd>
+                                </dl>
+                                <p>固定机位和摇镜会先平滑前往机位，再保持位置。跟拍用于玩家时保持后侧构图；用于场景时保持入镜方向。</p>
+                                <p>输入界面、玩家预告或权限条件需要暂停时，运镜会继续服从客户端与服务器检查。</p>
+                            </aside>
+                        </div>
+                    </section>
+                    <section id="queueConfig" class="configuration-panel" hidden aria-label="队列配置">
+                        <div class="configuration-heading">
+                            <h2>队列与自动补足</h2>
+                            <p>人工安排优先保留；自动候选仅补在队尾，不重排人工项。</p>
+                        </div>
+                        <div class="configuration-columns">
+                            <section class="configuration-card">
+                                <form id="queueSettingsForm">
+                                    <div class="form-section-heading">
+                                        <h3>默认排播方式</h3>
+                                        <span id="queueDraftStatus">等待同步</span>
+                                    </div>
+                                    <label class="checkbox-row prominent-checkbox">
+                                        <input id="queueAutoFill" type="checkbox" checked>
+                                        <span>自动向队尾补足候选</span>
+                                    </label>
+                                    <p class="field-help">只从当前世界可用素材补足；候选不足时如实保留空缺。</p>
+                                    <label class="setting-label" for="queueBufferSize">前向缓存数量 <span>项</span>
+                                    </label>
+                                    <input id="queueBufferSize" class="setting-number" type="number" min="1" max="12" step="1" required value="4">
+                                    <p class="field-help">默认 4 项，可设置 1–12 项。队列总上限 64 项。</p>
+                                    <label class="setting-label" for="queueSceneDuration">默认场景时长 <span>秒</span>
+                                    </label>
+                                    <input id="queueSceneDuration" class="setting-number" type="number" min="30" max="600" step="1" required value="120">
+                                    <p class="field-help">用于观景点与巡游区域。玩家默认随机计划 180–480 秒，可在加入时指定或用 ±10 秒调整，播出时由服务器核准。</p>
+                                    <div class="form-actions">
+                                        <button id="saveQueueSettings" class="button accent" type="submit" disabled>应用并保存</button>
+                                        <button id="resetQueueSettings" class="button" type="button">放弃草稿</button>
+                                    </div>
+                                    <p id="queueSettingsActual" class="field-help">等待客户端配置</p>
+                                </form>
+                            </section>
+                            <aside class="configuration-notes">
+                                <h3>短队列，而非整晚脚本</h3>
+                                <p>自动补足只准备后面几项。新增、插入、上移、下移与移除都由客户端维护同一条队列。</p>
+                                <p>场景与玩家候选同时可用时，按 80:20 倾向补足；候选不足时使用另一类。每几项的实际比例会有变化。</p>
+                                <p>停止导播后，编辑队列不会自动开播；再次启动仍需要明确操作。</p>
+                                <dl>
+                                    <dt>人工素材</dt>
+                                    <dd>标记为“手动”</dd>
+                                    <dt>本地自动补足</dt>
+                                    <dd>标记为“自动”</dd>
+                                    <dt>AI 选点</dt>
+                                    <dd>后续接入，仅参与短决策</dd>
+                                </dl>
+                            </aside>
+                        </div>
+                    </section>
+                    <section id="aiConfig" class="configuration-panel" hidden aria-label="AI 提供方配置">
+                        <div class="configuration-heading">
+                            <h2>AI 策略提供方 <span id="aiStrategyBadge" class="badge">等待同步</span>
+                            </h2>
+                            <p>AI 仅选择队列候选，本地完成运镜。默认关闭；启用后按需发起短决策，调用间隔至少 60 秒。</p>
+                        </div>
+                        <div class="ai-content">
+                            <section class="ai-editor">
+                                <div class="provider-tabs" aria-label="AI 提供方">
+                                    <button data-provider="DEEPSEEK" class="active" aria-pressed="true">
+                                        <strong>DeepSeek</strong>
+                                        <span>DS</span>
+                                    </button>
+                                    <button data-provider="OPENAI" aria-pressed="false">
+                                        <strong>OpenAI</strong>
+                                        <span>GPT</span>
+                                    </button>
+                                </div>
+                                <form id="aiForm">
+                                    <div class="form-section-heading">
+                                        <h2 id="aiProviderTitle">DeepSeek 配置</h2>
+                                        <span id="aiDraftStatus">等待同步</span>
+                                    </div>
+                                    <label class="checkbox-row ai-enable-row">
+                                        <input id="aiEnabled" type="checkbox">
+                                        <span>启用 AI 策略选点</span>
+                                    </label>
+                                    <p class="field-help">随本次配置保存。需完整的地址、模型和密钥；导播停止时不发起策略请求，失败时使用本地选点。</p>
+                                    <label for="apiBase">API 基础地址</label>
+                                    <input id="apiBase" type="text" inputmode="url" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="https://…">
+                                    <p class="field-help">支持 HTTP(S) 基础地址，不包含查询参数、片段或账号密码。</p>
+                                    <label for="apiModel">模型 ID</label>
+                                    <input id="apiModel" type="text" maxlength="256" autocomplete="off" spellcheck="false" placeholder="填写账号可用的模型 ID">
+                                    <p class="field-help">可手填，或保存地址与密钥后测试连接并从返回列表选择。列表可用不代表支持策略调用。</p>
+                                    <div class="ai-model-tools">
+                                        <button id="testAi" type="button" class="button compact" disabled>测试已保存的连接</button>
+                                        <select id="aiModelList" aria-label="连接测试返回的模型列表" disabled>
+                                            <option value="">测试后选择模型</option>
+                                        </select>
+                                    </div>
+                                    <p id="aiTestStatus" class="field-help" role="status">连接测试仅请求模型列表，不发起聊天或启用策略。</p>
+                                    <div class="label-row">
+                                        <label for="apiKey">API Key</label>
+                                        <span id="keyPresence" class="muted">尚未同步</span>
+                                    </div>
+                                    <input id="apiKey" type="password" maxlength="4096" autocomplete="off" spellcheck="false" aria-label="API Key，内容始终遮挡">
+                                    <p class="field-help">留空保留已有密钥。支持粘贴，禁止复制或剪切；页面不会读取已保存密钥。</p>
+                                    <label class="checkbox-row">
+                                        <input id="clearKey" type="checkbox">
+                                        <span>明确清除该提供方已保存的密钥</span>
+                                    </label>
+                                    <div class="form-actions">
+                                        <button id="saveAi" type="submit" class="button accent" disabled>保存到客户端本机</button>
+                                        <button id="resetAi" type="button" class="button">放弃当前草稿</button>
+                                        <span id="aiSaveStatus" class="muted">等待配置状态</span>
+                                    </div>
+                                </form>
+                            </section>
+                            <aside class="ai-notes">
+                                <h2>配置与运行状态</h2>
+                                <dl>
+                                    <dt>当前保存的提供方</dt>
+                                    <dd id="aiSavedProvider">—</dd>
+                                    <dt>本机配置</dt>
+                                    <dd id="aiConfigStatus">等待同步</dd>
+                                    <dt>模型策略</dt>
+                                    <dd id="aiRuntimeStatus">等待同步</dd>
+                                    <dt>最近策略状态</dt>
+                                    <dd id="aiLastStatus">—</dd>
+                                    <dt>下次请求最早</dt>
+                                    <dd id="aiNextRequest">—</dd>
+                                    <dt>本次会话策略请求</dt>
+                                    <dd id="aiRequests">0 次</dd>
+                                    <dt>输入 / 输出 Token</dt>
+                                    <dd id="aiTokenUsage">0 / 0</dd>
+                                    <dt>合计 Token</dt>
+                                    <dd id="aiTotalTokens">0</dd>
+                                    <dt>用量未返回的请求</dt>
+                                    <dd id="aiUnreportedRequests">0 次</dd>
+                                </dl>
+                                <div class="note-block">
+                                    <h3>游戏控制仍由 Mod 执行</h3>
+                                    <p>AI 仅建议目标，本地负责移动与运镜。玩家观察的预告、拒绝和世界规则始终生效；人工插入和调整的队列不被 AI 重排。</p>
+                                </div>
+                                <div class="note-block">
+                                    <h3>密钥只留在本机</h3>
+                                    <p>密钥仅在保存时提交给此客户端，不发送给游戏服务器。请勿分享包含本机密钥的配置文件。</p>
+                                </div>
+                            </aside>
+                        </div>
+                        <section class="decision-preview">
+                            <div class="form-section-heading">
+                                <h3>AI 决策协议 · 只读预览</h3>
+                                <span class="badge warning">不代表实际调用</span>
+                            </div>
+                            <p>Mod 先过滤不可用素材并评分，AI 只从少量候选返回短 ID，完成一次短决策。此处显示当前请求预览，不代表已有计费调用。</p>
+                            <pre id="aiDecisionPreview">等待客户端提供协议预览</pre>
+                        </section>
+                    </section>
+                    <section id="mapConfig" class="configuration-panel" hidden aria-label="地图数据配置与缓存">
+                        <div class="configuration-heading">
+                            <h2>当前世界地图数据 <span id="mapStatusBadge" class="badge">等待同步</span></h2>
+                            <p>为当前服务器与世界保存 Dynmap 外链，客户端直接导入标记和区域。没有导播服务也能配置和拉取，缓存保存在本机。</p>
+                        </div>
+                        <div class="configuration-columns">
+                            <section class="configuration-card">
+                                <form id="mapSettingsForm" class="map-settings-form">
+                                    <div class="form-section-heading">
+                                        <h3>本机地图来源</h3>
+                                        <span id="mapDraftStatus">等待同步</span>
+                                    </div>
+                                    <p id="mapSettingsScope" class="field-help">进入世界后可配置此服务器与世界的地图来源。</p>
+                                    <label for="mapLocalBaseUrl">Dynmap 基础 URL</label>
+                                    <input id="mapLocalBaseUrl" type="text" inputmode="url" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="https://map.bilicraft.com/s2/hyperion/" disabled>
+                                    <p class="field-help">填写地图首页所在地址，不填瓦片或 JSON 文件地址；不包含账号密码、查询参数或片段。</p>
+                                    <label for="mapLocalWorld">Dynmap 世界名</label>
+                                    <input id="mapLocalWorld" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="例如 Paralon，以 Dynmap 实际世界名为准" disabled>
+                                    <p class="field-help">可与游戏世界名不同。本机来源优先；清除后可使用导播服务提供的来源。</p>
+                                    <div class="form-actions">
+                                        <button id="saveMapSettings" type="submit" class="button accent" disabled>保存本机来源</button>
+                                        <button id="resetMapSettings" type="button" class="button" disabled>放弃草稿</button>
+                                        <button id="clearMapSettings" type="button" class="text-button" disabled>清空本机来源</button>
+                                    </div>
+                                    <p class="field-help">保存不会联网下载。保存后点击下方「拉取当前世界地图」；清除时将两个字段同时留空并保存。</p>
+                                </form>
+                                <dl class="map-data-details">
+                                    <dt>当前世界</dt><dd id="mapConfigWorld">—</dd>
+                                    <dt>导播服务</dt><dd id="mapServiceStatus">等待同步</dd>
+                                    <dt>当前生效来源</dt><dd id="mapSourceKind">等待同步</dd>
+                                    <dt>Dynmap 世界映射</dt><dd id="mapMappingStatus">等待同步</dd>
+                                    <dt>地图外链</dt><dd id="mapSourceUrl">尚未配置</dd>
+                                    <dt>本机导入景点</dt><dd id="mapSceneCount">0 项</dd>
+                                    <dt>本机缓存时间</dt><dd id="mapFetchedAt">尚未导入</dd>
+                                </dl>
+                                <p id="mapImportDetail" class="field-help" role="status">进入观察者模式后，可保存本机来源并手动导入地图。</p>
+                                <div class="form-actions">
+                                    <button id="mapConfigRefresh" type="button" class="button accent" data-command="mapRefresh" disabled>拉取当前世界地图</button>
+                                </div>
+                            </section>
+                            <aside class="configuration-notes">
+                                <h3>本机独立使用</h3>
+                                <p>本地巡游、景点队列、AI 选点与运镜均由 Mod 执行。地图来源按服务器地址与游戏世界分别保存，切换服务器或世界会清理未保存草稿。</p>
+                                <h3>服务端配置</h3>
+                                <p id="mapAdminHelp">管理员使用 <code>/aiview map set &lt;实际允许世界名&gt; &lt;Dynmap 世界名&gt; &lt;地图基础 URL&gt;</code> 设置对应关系；使用 <code>/aiview map status &lt;世界名&gt;</code> 查询，<code>/aiview map clear &lt;世界名&gt;</code> 清除。游戏连接仅下发这份外链信息。</p>
+                                <h3>按需更新，低负载</h3>
+                                <p>点击按钮后由客户端直连地图外链，不经游戏服务器下载或传输地图 JSON；页面轮询只读取本机状态。当前未启用持续热力采集。</p>
+                                <h3>没有导播服务时</h3>
+                                <p>照常使用本机地图来源、观景缓存、巡游与队列。玩家跟随仍须由导播服务授权，不会在本地模式下启动。</p>
+                            </aside>
+                        </div>
+                    </section>
+                    <section id="rulesConfig" class="configuration-panel" hidden aria-label="服务器规则与接入能力">
+                        <div class="configuration-heading">
+                            <h2>规则与接入能力</h2>
+                            <p>本地巡游、地图、AI 选点、队列与运镜可独立运行；玩家跟随须由服务器负责预告、拒绝与授权。</p>
+                        </div>
+                        <div class="rules-grid">
+                            <article>
+                                <span class="rule-number">15 秒</span>
+                                <h3>玩家观察预告</h3>
+                                <p>定向私密通知后等待服务器授权；玩家可以点击拒绝或加入长期黑名单。</p>
+                            </article>
+                            <article>
+                                <span class="rule-number">10 秒</span>
+                                <h3>无动作退出</h3>
+                                <p>连续无移动、明显转头或交互时退出玩家观察。</p>
+                            </article>
+                            <article>
+                                <span class="rule-number">服务器权威</span>
+                                <h3>拒绝与黑名单</h3>
+                                <p>拒绝 24 小时、普通结束 30 分钟冷却；长期黑名单由服务器持久保存。</p>
+                            </article>
+                            <article>
+                                <span class="rule-number">仅已加载</span>
+                                <h3>世界与目标边界</h3>
+                                <p>使用当前世界已加载附近素材。本机地图按服务器与世界隔离；接入导播服务后继续检查世界允许名单、权限与排除区。</p>
+                            </article>
+                        </div>
+                        <section class="configuration-card capability-table">
+                            <h3>数据与执行能力</h3>
+                            <dl>
+                                <dt>Dynmap 导入</dt>
+                                <dd id="mapRulesStatus">本机配置优先，仅手动直连外链导入，缓存保存在本机</dd>
+                                <dt>持续热力采集</dt>
+                                <dd>默认关闭，当前未实现采集分析</dd>
+                                <dt>AI 策略调用</dt>
+                                <dd id="aiRulesStatus">默认关闭，启用后仅选择队列候选；失败回退本地策略</dd>
+                                <dt>区域传送</dt>
+                                <dd>尚未实现，不自动跨世界传送</dd>
+                            </dl>
+                        </section>
+                    </section>
+                </section>
+            </main>
+        </div>
+        <section id="logPanel" class="log-panel collapsed" aria-label="命令记录">
+            <div class="log-heading">
+                <button id="logToggle" class="log-toggle" aria-expanded="false">
+                    <span class="chevron">⌃</span>
+                    <strong>命令记录</strong>
+                    <span id="logCount" class="count">0</span>
+                </button>
+                <span id="logLatest" class="log-latest">本地会话记录，不记录配对信息与密钥</span>
+                <button id="clearLogs" class="text-button">清空</button>
+            </div>
+            <ol id="commandLog" class="command-log">
+            </ol>
+        </section>
+        <div id="feedback" class="feedback" role="status" aria-live="polite" hidden>
+        </div>
+    </body>
+</html>
