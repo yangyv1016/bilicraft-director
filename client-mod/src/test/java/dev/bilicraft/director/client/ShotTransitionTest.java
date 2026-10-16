@@ -43,6 +43,20 @@ class ShotTransitionTest {
     }
 
     @Test
+    void startingAnotherTargetKeepsAnAlreadyOpaquePreparationHidden() {
+        ShotTransition transition = new ShotTransition();
+        transition.begin(1_000);
+        assertEquals(1, transition.opacity(1_250, true));
+        transition.begin(10_000);
+        assertTrue(transition.preparing());
+        assertTrue(transition.opaque(10_000));
+        assertEquals(1, transition.opacity(10_000, false));
+        assertEquals(1, transition.opacity(10_125, false));
+        transition.reveal(10_250);
+        assertEquals(0.5, transition.opacity(10_625, false));
+    }
+
+    @Test
     void cancelAndStartingAnotherTargetCannotReuseAPreviousReadyState() {
         ShotTransition transition = new ShotTransition();
         transition.begin(0);
@@ -50,9 +64,15 @@ class ShotTransitionTest {
         transition.begin(300);
         assertTrue(transition.preparing());
         assertFalse(transition.opaque(549));
+        transition.begin(400);
+        assertEquals(0, transition.opacity(400, false));
+        assertFalse(transition.opaque(649));
         transition.clear();
         assertFalse(transition.preparing());
         assertFalse(transition.opaque(5_000));
         assertEquals(0, transition.opacity(5_000, true));
+        transition.begin(5_000);
+        assertEquals(0, transition.opacity(5_000, false));
+        assertFalse(transition.opaque(5_249));
     }
 }

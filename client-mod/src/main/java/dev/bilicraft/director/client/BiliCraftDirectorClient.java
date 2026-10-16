@@ -74,6 +74,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     final CameraSettings settings = new CameraSettings();
     private boolean cameraSettingsSaved = true;
     private final CameraMotion cameraMotion = new CameraMotion();
+    private final CameraTerrainAvoidance terrainAvoidance = new CameraTerrainAvoidance();
+    private CameraTerrainAvoidance.Decision terrainDecision;
+    private int terrainLandingAttempts;
+    private CameraMotion.Point lastSafeCameraPosition;
+    private boolean terrainReturning;
+    private boolean terrainRecoveryBlocked;
     final AiSettings aiSettings = new AiSettings(FabricLoader.getInstance().getConfigDir()
             .resolve("bilicraft-director-ai.local.properties"));
     private final AiHttpClient aiHttpClient = new AiHttpClient();
@@ -171,6 +177,17 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         instance = this;
+        LocalMapSettings.Profile defaultMap = LocalMapSettings.BILICRAFT_DEFAULT;
+        LOGGER.info("Prefetching default Dynmap data during client initialization");
+        mapClient.fetch(defaultMap.baseUrl(), defaultMap.dynmapWorld(), "minecraft:overworld")
+                .whenComplete((result, error) -> {
+                    if (error != null) {
+                        LOGGER.warn("Default Dynmap prefetch failed; entering the matching world or refreshing the map can retry");
+                    } else {
+                        LOGGER.info("Default Dynmap prefetch ready: {} scenes, {} regions",
+                                result.scenes().size(), result.regions().size());
+                    }
+                });
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(literal("directoridle")
                 .then(literal("set").executes(context -> {
                     ClientPlayerEntity player = context.getSource().getPlayer();
@@ -665,6 +682,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void clearMapState() {
+        terrainAvoidance.reset();
+        terrainDecision = null;
+        lastSafeCameraPosition = null;
+        terrainReturning = false;
+        terrainRecoveryBlocked = false;
         mapGeneration++;
         localMapProfile = new LocalMapSettings.Profile("", "");
         mapSource = null;
@@ -727,7 +749,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                         lastServer == null ? "singleplayer" : lastServer.address, currentWorldKey));
                 mapSource = new Message.MapSource(0, currentWorldKey, true, localMapProfile.baseUrl(),
                         localMapProfile.dynmapWorld(), List.of(), mapBootstrapPending
-                        ? "BiliCraft 默认地图已配置，资源包与世界就绪后自动拉取一次" : "本机地图配置已载入；点击拉取后才连接外链");
+                        ? "BiliCraft 默认地图已在启动时预取，资源包与世界就绪后复用或刷新" : "本机地图配置已载入；点击拉取后才连接外链");
                 mapDetail = mapSource.detail();
             }
         } catch (IOException | IllegalArgumentException exception) {
@@ -1055,6 +1077,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void tickQueue(MinecraftClient client, long now) {
+        if (terrainRecoveryBlocked) return;
         pruneAutomaticQueue(client);
         ShowcaseQueue.Entry current = showcaseQueue.current();
         boolean paused = client.currentScreen != null || client.isPaused() || !connectionSession.ready();
@@ -1067,6 +1090,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 showcaseQueue.refreshCurrentTarget(latest);
             }
             boolean arrivingThisTick = sceneArrival != null || shotTransition.preparing();
+            boolean keepTerrainCovered = sceneArrival != null && sceneArrival.teleport();
             if (sceneArrival != null && targetValid && activeScene != null) {
                 if (!paused && sceneArrival.takeTeleportCommand(now)) {
                     String command = sceneArrival.teleportCommand();
@@ -1074,15 +1098,53 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     client.getNetworkHandler().sendChatCommand(command);
                     status = "已请求本人传送，等待到达并加载场景";
                 }
-                if (sceneArrival.arrived(new CameraMotion.Point(client.player.getX(), client.player.getY(),
-                        client.player.getZ()), sceneChunksLoaded(client, sceneArrival.destination()))) {
+                CameraMotion.Point actual = new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ());
+                boolean idle = idlePoint != null && idlePoint.matches(activeScene);
+                CameraMotion.Point resolved = !idle && !sceneArrival.teleport() ? terrainAvoidance.resolvedDestination() : null;
+                CameraMotion.Point arrivalPosition = resolved == null ? sceneArrival.destination() : resolved;
+                boolean arrived = sceneArrival.teleport() || resolved == null
+                        ? sceneArrival.arrived(actual, sceneChunksLoaded(client, arrivalPosition))
+                        : sceneChunksLoaded(client, arrivalPosition) && new Vec3d(actual.x(), actual.y(), actual.z())
+                        .squaredDistanceTo(arrivalPosition.x(), arrivalPosition.y(), arrivalPosition.z()) <= 1;
+                if (arrived && !idle) {
+                    CameraTerrainWorld terrain = new CameraTerrainWorld(client.player, worldExclusions());
+                    CameraMotion.Point lookAt = new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z());
+                    arrived = terrain.space(actual) == CameraTerrainAvoidance.Clearance.CLEAR
+                            && (terrainReturning || terrain.view(actual, lookAt) == CameraTerrainAvoidance.Clearance.CLEAR);
+                    if (!arrived && sceneArrival.teleport() && !terrainReturning && terrainLandingAttempts < 2) {
+                        CameraMotion.Point safe = terrainAvoidance.landing(new ShowcaseTarget.Scene(activeScene).id(),
+                                new CameraMotion.Shot(sceneArrival.destination(), lookAt), terrain);
+                        if (safe != null) {
+                            sceneArrival = new SceneArrival(safe, now);
+                            terrainLandingAttempts++;
+                            status = "遮罩内修正受地形遮挡的传送机位";
+                        }
+                    }
+                    keepTerrainCovered = !arrived && sceneArrival.teleport();
+                }
+                if (arrived && terrainReturning) {
+                    terrainReturning = false;
+                    sceneArrival = null;
+                    targetValid = false;
+                    keepTerrainCovered = false;
+                    status = "没有可用的安全构图，已返回先前安全机位并跳过";
+                } else if (arrived) {
                     sceneArrival = null;
                     cameraMotion.reset();
                     status = "已到达，正在展示 " + activeScene.name();
                 } else if (sceneArrival.timedOut(now)) {
-                    targetValid = false;
-                    status = sceneArrival.teleport() ? "前往场景超时，已跳过；请检查本人 tp 权限或区块加载"
-                            : "平滑前往场景超时，已跳过；请检查路线边界与区块加载";
+                    if (!idle && sceneArrival.teleport() && !terrainReturning && lastSafeCameraPosition != null) {
+                        sceneArrival = new SceneArrival(lastSafeCameraPosition, now);
+                        terrainReturning = true;
+                        status = "安全机位不可用，正在遮罩下返回先前已确认机位";
+                    } else {
+                        targetValid = false;
+                        CameraTerrainAvoidance.Clearance currentSpace = new CameraTerrainWorld(client.player, worldExclusions()).space(actual);
+                        keepTerrainCovered |= currentSpace != CameraTerrainAvoidance.Clearance.CLEAR;
+                        terrainRecoveryBlocked = !idle && currentSpace != CameraTerrainAvoidance.Clearance.CLEAR;
+                        status = terrainRecoveryBlocked ? "当前机位尚不安全，保持遮罩；请手动停止或选择远处安全场景"
+                                : "前往场景超时，已跳过；请检查本人 tp 权限、地形或区块加载";
+                    }
                 }
             }
             if (targetValid && activeScene != null && sceneArrival == null && !shotTransition.preparing() && !paused) {
@@ -1094,7 +1156,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 activeScene = null;
                 sceneArrival = null;
-                if (arrivingThisTick) shotTransition.reveal(now);
+                if (arrivingThisTick && !keepTerrainCovered) shotTransition.reveal(now);
                 showcaseQueue.finishCurrent();
                 stopMotion();
                 resetOrbit(client.player);
@@ -1102,6 +1164,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         } else if (current != null && requestedTarget == null) {
             showcaseQueue.finishCurrent();
         }
+        if (terrainRecoveryBlocked) return;
         if (automaticPatrolAllowed() && queueSettings.autoFill && showcaseQueue.pending().size() < queueSettings.bufferSize) {
             if (showcaseQueue.current() == null && showcaseQueue.peek() == null
                     && !paused && !mapLoading && !snapshotPending && !hasBusinessRequest() && now >= retreatUntil
@@ -1246,6 +1309,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     public void stop(String reason) {
+        terrainAvoidance.reset();
+        terrainDecision = null;
+        terrainReturning = false;
+        terrainRecoveryBlocked = false;
         shotTransition.clear();
         invalidateAiDecision();
         if (requestedTarget != null || (observeRequestTarget != null && !businessRequestCancelled)) {
@@ -1378,6 +1445,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "导播请求处理中，请稍后再展示";
             return false;
         }
+        if (target instanceof ShowcaseTarget.Player && new CameraTerrainWorld(client.player, worldExclusions()).space(
+                new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ())) != CameraTerrainAvoidance.Clearance.CLEAR) {
+            status = "当前机位尚不安全，请先选择场景或手动停止后调整位置";
+            return false;
+        }
         if (!targetAvailable(target)) {
             status = target instanceof ShowcaseTarget.Player ? "玩家需要服务授权，且必须已加载并在 96 格内"
                     : "场景需属于当前世界，且符合世界边界、高度与已知排除区规则";
@@ -1393,6 +1465,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             send(new Message.Stop());
             endObservation("切换展示目标");
         }
+        terrainAvoidance.reset();
+        terrainDecision = null;
+        terrainLandingAttempts = 0;
+        terrainReturning = false;
+        terrainRecoveryBlocked = false;
         if (target instanceof ShowcaseTarget.Player player) {
             if (!send(new Message.ObserveRequest(player.view().id(), durationSeconds))) {
                 revokeServerAccess("玩家观察请求发送失败");
@@ -1409,6 +1486,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             stopMotion();
             status = "正在请求玩家展示预告";
         } else if (target instanceof ShowcaseTarget.Scene scene) {
+            CameraMotion.Point current = new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ());
+            if (new CameraTerrainWorld(client.player, worldExclusions()).space(current) == CameraTerrainAvoidance.Clearance.CLEAR) {
+                lastSafeCameraPosition = current;
+            }
             activeScene = scene.view();
             sceneArrival = idlePoint != null && idlePoint.matches(activeScene)
                     ? new SceneArrival(idlePoint.position(), System.currentTimeMillis())
@@ -1505,6 +1586,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void resetOrbit(ClientPlayerEntity player) {
+        terrainAvoidance.reset();
+        terrainDecision = null;
         Vec3d direction = new Vec3d(player.getRotationVec(1).x, 0, player.getRotationVec(1).z).normalize();
         orbitCenter = player.getEntityPos().add(direction.multiply(settings.radius));
         cameraMotion.reset();
@@ -1519,6 +1602,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
         if (!canOperate(client)) {
             stop("导播需要观察者模式");
+            return;
+        }
+        if (terrainRecoveryBlocked) {
+            stopMotion();
             return;
         }
         if (allowed && System.currentTimeMillis() - lastMessage > 8_000) {
@@ -1582,6 +1669,14 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 resetOrbit(player);
                 return;
             }
+            if (new CameraTerrainWorld(player, worldExclusions()).path(
+                    new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
+                    new CameraMotion.Point(nextPosition.x, nextPosition.y, nextPosition.z)) != CameraTerrainAvoidance.Clearance.CLEAR) {
+                retreatUntil = 0;
+                stopMotion();
+                resetOrbit(player);
+                return;
+            }
             player.setVelocity(velocity);
             float turnLimit = (float) (settings.turnRateDegreesPerSecond / 20);
             player.setYaw(player.getYaw() + MathHelper.clamp(MathHelper.wrapDegrees(awayYaw - player.getYaw()), -turnLimit, turnLimit));
@@ -1626,7 +1721,16 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         CameraMotion.Shot shot = sceneArrival == null ? cameraMotion.sample(subject,
                 new CameraMotion.Point(player.getX(), player.getY(), player.getZ()), settings)
                 : new CameraMotion.Shot(sceneArrival.destination(), subject.center());
-        Vec3d desired = new Vec3d(shot.position().x(), shot.position().y(), shot.position().z());
+        terrainDecision = terrainAvoidance.plan(subject.id(), shot,
+                new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
+                new CameraTerrainWorld(player, worldExclusions()), now, sceneArrival != null);
+        if (terrainDecision.waiting()) {
+            stopMotion();
+            status = "等待已加载地形中的安全机位或绕行路线";
+            return;
+        }
+        CameraMotion.Point safePosition = terrainDecision.destination();
+        Vec3d desired = new Vec3d(safePosition.x(), safePosition.y(), safePosition.z());
         Vec3d lookAt = new Vec3d(shot.lookAt().x(), shot.lookAt().y(), shot.lookAt().z());
         if (!client.world.getWorldBorder().contains(desired)
                 || desired.y < client.world.getBottomY() || desired.y > client.world.getTopYInclusive()
@@ -1646,6 +1750,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         float yaw = (float) Math.toDegrees(Math.atan2(sight.z, sight.x)) - 90;
         float pitch = (float) -Math.toDegrees(Math.atan2(sight.y, Math.sqrt(sight.x * sight.x + sight.z * sight.z)));
         if (shotTransition.preparing()) {
+            if (new CameraTerrainWorld(player, worldExclusions()).space(
+                    new CameraMotion.Point(player.getX(), player.getY(), player.getZ())) != CameraTerrainAvoidance.Clearance.CLEAR) {
+                stopMotion();
+                status = "当前机位受地形遮挡，继续保持起镜遮罩";
+                return;
+            }
             revealShot(player, yaw, pitch, now);
             return;
         }
@@ -1669,13 +1779,15 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "前方机位到达世界边界、高度限制或排除区，已暂缓移动";
             return;
         }
-        if (!client.world.getChunkManager().isChunkLoaded(MathHelper.floor(nextPosition.x) >> 4,
-                MathHelper.floor(nextPosition.z) >> 4)) {
+        if (new CameraTerrainWorld(player, worldExclusions()).path(
+                new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
+                new CameraMotion.Point(nextPosition.x, nextPosition.y, nextPosition.z)) != CameraTerrainAvoidance.Clearance.CLEAR) {
             stopMotion();
-            status = "等待前方机位区块加载";
+            status = "前方地形或区块尚不安全，已停止移动";
             return;
         }
         player.setVelocity(nextVelocity);
+        lastSafeCameraPosition = new CameraMotion.Point(player.getX(), player.getY(), player.getZ());
         float turnLimit = (float) (settings.turnRateDegreesPerSecond / 20);
         player.setYaw(player.getYaw() + MathHelper.clamp(MathHelper.wrapDegrees(yaw - player.getYaw()), -turnLimit, turnLimit));
         player.setPitch(player.getPitch() + MathHelper.clamp(pitch - player.getPitch(), -turnLimit * 2 / 3, turnLimit * 2 / 3));
@@ -1813,6 +1925,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 || showcaseQueue.current().source() == ShowcaseQueue.Source.AUTO))));
         state.addProperty("sceneArriving", sceneArrival != null);
         state.addProperty("sceneTravelMode", sceneArrival == null ? null : sceneArrival.teleport() ? "TELEPORT" : "FLY");
+        JsonObject terrain = new JsonObject();
+        terrain.addProperty("waiting", terrainRecoveryBlocked || terrainDecision != null && terrainDecision.waiting());
+        terrain.addProperty("adjusted", terrainDecision != null && terrainDecision.adjusted());
+        terrain.addProperty("temporaryLift", terrainAvoidance.temporaryLift());
+        terrain.addProperty("returning", terrainReturning);
+        state.add("terrain", terrain);
         JsonObject observation = new JsonObject();
         observation.addProperty("state", remoteAllowed ? observeState.name() : ObserveState.ENDED.name());
         observation.addProperty("targetId", !remoteAllowed || requestedTarget == null ? null : requestedTarget.toString());
@@ -2217,6 +2335,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     settings.playerHeightOffset = playerHeightOffset;
                     settings.motionAmplitude = amplitude;
                     settings.turnRateDegreesPerSecond = turnRate;
+                    terrainAvoidance.reset();
+                    terrainDecision = null;
                     if (sceneArrival != null && !sceneArrival.teleport() && activeScene != null) {
                         sceneArrival = SceneArrival.planFlight(
                                 new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ()),

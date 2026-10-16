@@ -7,6 +7,7 @@ final class ShotTransition {
     private boolean preparing;
 
     void begin(long now) {
+        if (preparing && opaque(now)) return;
         startedAt = now;
         active = true;
         preparing = true;
