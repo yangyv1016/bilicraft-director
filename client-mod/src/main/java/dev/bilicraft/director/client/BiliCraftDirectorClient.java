@@ -118,6 +118,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private boolean sceneCacheLimited;
     private ShowcaseTarget lastSelectedTarget;
     private SceneView activeScene;
+    private SceneArrival sceneArrival;
     private boolean snapshotPending;
     private String snapshotWorldKey;
     private long businessRequestDeadline;
@@ -189,6 +190,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             businessRequestCancelled = false;
             targetSwitchDirection = 0;
             activeScene = null;
+            sceneArrival = null;
             showcaseQueue.clear();
             lastQueueRefreshAttempt = 0;
             cachedScenes = List.of();
@@ -226,6 +228,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             targets = List.of();
             cachedScenes = List.of();
             activeScene = null;
+            sceneArrival = null;
             showcaseQueue.clear();
             lastSelectedTarget = null;
             snapshotPending = false;
@@ -248,8 +251,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         });
         HudElementRegistry.addLast(Identifier.of("bilicraftdirector", "transition"), (context, tickCounter) -> {
             long elapsed = System.currentTimeMillis() - fadeStarted;
-            if (fadeStarted != 0 && elapsed < 1_000) {
-                double opacity = elapsed < 250 ? elapsed / 250.0 : 1 - (elapsed - 250) / 750.0;
+            if (running && fadeStarted != 0 && (sceneArrival != null || elapsed < 1_000)) {
+                double opacity = elapsed < 250 ? elapsed / 250.0
+                        : sceneArrival != null ? 1 : 1 - (elapsed - 250) / 750.0;
                 int alpha = (int) (MathHelper.clamp(opacity, 0, 1) * 255);
                 context.fill(0, 0, context.getScaledWindowWidth(), context.getScaledWindowHeight(), alpha << 24);
             }
@@ -626,52 +630,21 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
 
     private void refreshMapTargets(MinecraftClient client) {
         if (client.world == null || client.player == null) return;
-        ArrayList<SceneView> candidates = new ArrayList<>(serverScenes);
+        List<SceneView> mapCandidates = List.of();
         if (mapSource != null && mapSource.configured()) {
-            List<SceneView> mapCandidates = !mapLoaded
+            mapCandidates = !mapLoaded
                     ? cachedScenes.stream().filter(scene -> scene.world().equals(currentWorldKey)
                     && scene.id().startsWith(DynmapMapClient.scenePrefix(mapSource.baseUrl(), mapSource.dynmapWorld(), currentWorldKey))).toList()
                     : importedScenes;
-            mapCandidates.stream().filter(scene -> scene.world().equals(currentWorldKey))
-                    .filter(scene -> client.player.getEntityPos().squaredDistanceTo(scene.x(), scene.y(), scene.z())
-                            <= (96 - scene.radius()) * (96 - scene.radius()))
-                    .sorted(Comparator.comparingDouble(scene -> client.player.getEntityPos().squaredDistanceTo(scene.x(), scene.y(), scene.z())))
-                    .limit(128)
-                    .filter(scene -> targetAvailable(new ShowcaseTarget.Scene(scene)))
-                    .forEach(candidates::add);
         }
+        List<SceneView> scenes = SceneLibrary.merge(currentWorldKey, serverScenes, mapCandidates);
+        ArrayList<ShowcaseTarget> updated = new ArrayList<>(targets.stream().filter(target -> target instanceof ShowcaseTarget.Player).toList());
+        scenes.forEach(scene -> updated.add(new ShowcaseTarget.Scene(scene)));
+        targets = updated.stream().sorted(TARGET_ORDER).toList();
         try {
-            ArrayList<SceneView> scenes = new ArrayList<>();
-            HashSet<String> ids = new HashSet<>();
-            int emptySize = Codec.encode(new Message.Snapshot(List.of(), List.of())).length;
-            int remaining = Protocol.MAX_PACKET_BYTES - emptySize;
-            boolean limited = false;
-            for (SceneView scene : candidates) {
-                if (!ids.add(scene.id())) continue;
-                int bytes = Codec.encode(new Message.Snapshot(List.of(), List.of(scene))).length - emptySize;
-                if (scenes.size() < Protocol.MAX_SCENES && bytes <= remaining) {
-                    scenes.add(scene);
-                    remaining -= bytes;
-                } else {
-                    limited = true;
-                }
-            }
-            ArrayList<ShowcaseTarget> updated = new ArrayList<>(targets.stream().filter(target -> target instanceof ShowcaseTarget.Player).toList());
-            scenes.forEach(scene -> updated.add(new ShowcaseTarget.Scene(scene)));
-            targets = updated.stream().sorted(TARGET_ORDER).toList();
-            ArrayList<SceneView> combined = new ArrayList<>(scenes);
-            for (SceneView scene : cachedScenes) {
-                if (scene.world().equals(currentWorldKey)) continue;
-                int bytes = Codec.encode(new Message.Snapshot(List.of(), List.of(scene))).length - emptySize;
-                if (combined.size() < Protocol.MAX_SCENES && bytes <= remaining) {
-                    combined.add(scene);
-                    remaining -= bytes;
-                } else {
-                    limited = true;
-                }
-            }
-            sceneCacheLimited = limited;
-            cachedScenes = List.copyOf(combined);
+            SceneLibrary.CacheSelection selection = SceneLibrary.selectCache(currentWorldKey, scenes, cachedScenes);
+            sceneCacheLimited = selection.limited();
+            cachedScenes = selection.scenes();
             sceneCache.save(lastServer == null ? "singleplayer" : lastServer.address, cachedScenes);
             sceneCacheFailed = false;
         } catch (IOException exception) {
@@ -699,10 +672,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         businessRequestCancelled = hasBusinessRequest();
         showcaseQueue.removePlayers();
         targetSwitchDirection = 0;
-        targets = cachedScenes.stream()
-                .filter(scene -> scene.world().equals(currentWorldKey))
-                .map(scene -> (ShowcaseTarget) new ShowcaseTarget.Scene(scene))
-                .sorted(TARGET_ORDER).toList();
+        targets = targets.stream().filter(target -> target instanceof ShowcaseTarget.Scene).toList();
         status = reason + "；仅使用本地导播与观景缓存";
     }
 
@@ -861,11 +831,30 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 activeScene = scene.view();
                 showcaseQueue.refreshCurrentTarget(latest);
             }
-            if (!targetValid || activeScene == null || showcaseQueue.tickScene(now, paused)) {
+            boolean arrivingThisTick = sceneArrival != null;
+            if (sceneArrival != null && targetValid && activeScene != null) {
+                if (!paused && sceneArrival.takeTeleportCommand(now)) {
+                    client.getNetworkHandler().sendChatCommand(sceneArrival.teleportCommand());
+                    status = "已请求本人传送，等待到达并加载场景";
+                }
+                if (sceneArrival.arrived(new CameraMotion.Point(client.player.getX(), client.player.getY(),
+                        client.player.getZ()), sceneChunksLoaded(client, activeScene))) {
+                    sceneArrival = null;
+                    cameraMotion.reset();
+                    fadeStarted = now - 250;
+                    status = "已到达，正在展示 " + activeScene.name();
+                } else if (sceneArrival.timedOut(now)) {
+                    targetValid = false;
+                    status = "前往场景超时，已跳过；请检查本人 tp 权限或区块加载";
+                }
+            }
+            if (!targetValid || activeScene == null || showcaseQueue.tickScene(now, paused || arrivingThisTick)) {
                 if (!targetValid || activeScene == null) {
                     showcaseQueue.suppress(current.target().id(), now + 30_000);
                 }
                 activeScene = null;
+                sceneArrival = null;
+                if (arrivingThisTick) fadeStarted = now - 250;
                 showcaseQueue.finishCurrent();
                 stopMotion();
                 resetOrbit(client.player);
@@ -922,6 +911,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
         showcaseQueue.finishCurrent();
         activeScene = null;
+        sceneArrival = null;
         stopMotion();
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
@@ -957,6 +947,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         requestedTarget = null;
         observeState = ObserveState.ENDED;
         activeScene = null;
+        sceneArrival = null;
         lastSelectedTarget = null;
         targetSwitchDirection = 0;
         previousTargetPosition = null;
@@ -980,6 +971,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             return false;
         }
         resumeAfterReconnect = false;
+        fadeStarted = 0;
         running = true;
         client.setCameraEntity(client.player);
         resetOrbit(client.player);
@@ -1006,6 +998,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         targetMovingUntil = 0;
         lastSelectedTarget = null;
         activeScene = null;
+        sceneArrival = null;
         // Keep business requests occupied until their responses drain on this connection.
         targetSwitchDirection = 0;
         retreatUntil = 0;
@@ -1068,7 +1061,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 .filter(target -> !target.id().equals(currentId))
                 .filter(this::targetAvailable).sorted(TARGET_ORDER).toList();
         if (candidates.isEmpty()) {
-            status = "附近暂无其他可展示目标，保留当前镜头";
+            status = "当前世界暂无其他可展示目标，保留当前镜头";
             return false;
         }
         ShowcaseTarget next = direction > 0 ? candidates.getFirst() : candidates.getLast();
@@ -1122,7 +1115,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
         if (!targetAvailable(target)) {
             status = target instanceof ShowcaseTarget.Player ? "玩家需要服务授权，且必须已加载并在 96 格内"
-                    : "场景需属于当前世界、位于 96 格内，且整个范围区块已加载";
+                    : "场景需属于当前世界，且符合世界边界、高度与已知排除区规则";
             return false;
         }
         String currentId = requestedTarget != null ? "player:" + requestedTarget
@@ -1141,6 +1134,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 return false;
             }
             activeScene = null;
+            sceneArrival = null;
             requestedTarget = player.view().id();
             observeRequestTarget = requestedTarget;
             businessRequestDeadline = System.currentTimeMillis() + 8_000;
@@ -1150,11 +1144,17 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "正在请求玩家展示预告";
         } else if (target instanceof ShowcaseTarget.Scene scene) {
             activeScene = scene.view();
+            double radius = Math.min(activeScene.radius(), settings.radius);
+            Vec3d center = new Vec3d(activeScene.x(), activeScene.y(), activeScene.z());
+            sceneArrival = client.player.getEntityPos().distanceTo(center) + radius > 96
+                    || !sceneChunksLoaded(client, activeScene)
+                    ? new SceneArrival(new CameraMotion.Point(activeScene.x() + radius,
+                    activeScene.y() + settings.heightOffset, activeScene.z()), System.currentTimeMillis()) : null;
             cameraMotion.reset();
             retreatUntil = 0;
             stopMotion();
             fadeStarted = System.currentTimeMillis();
-            status = "正在展示 " + scene.label();
+            status = sceneArrival == null ? "正在展示 " + scene.label() : "正在前往 " + scene.label();
         }
         lastSelectedTarget = target;
         client.setScreen(null);
@@ -1178,10 +1178,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 && scene.z() - scene.radius() <= region.maxZ())) {
             return false;
         }
-        Vec3d center = new Vec3d(scene.x(), scene.y(), scene.z());
         double verticalSwing = settings.mode == CameraMotion.Mode.CRANE ? settings.motionAmplitude / 4 : 0;
         if (!scene.world().equals(client.world.getRegistryKey().getValue().toString())
-                || client.player.getEntityPos().distanceTo(center) + scene.radius() > 96
                 || scene.y() < client.world.getBottomY()
                 || scene.y() + settings.heightOffset - verticalSwing < client.world.getBottomY()
                 || scene.y() + settings.heightOffset + verticalSwing > client.world.getTopYInclusive()
@@ -1189,10 +1187,15 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 || !client.world.getWorldBorder().contains(scene.x() + scene.radius(), scene.z() + scene.radius())) {
             return false;
         }
-        int minX = MathHelper.floor(scene.x() - scene.radius()) >> 4;
-        int maxX = MathHelper.floor(scene.x() + scene.radius()) >> 4;
-        int minZ = MathHelper.floor(scene.z() - scene.radius()) >> 4;
-        int maxZ = MathHelper.floor(scene.z() + scene.radius()) >> 4;
+        return true;
+    }
+
+    private boolean sceneChunksLoaded(MinecraftClient client, SceneView scene) {
+        double radius = Math.min(scene.radius(), settings.radius);
+        int minX = MathHelper.floor(scene.x() - radius) >> 4;
+        int maxX = MathHelper.floor(scene.x() + radius) >> 4;
+        int minZ = MathHelper.floor(scene.z() - radius) >> 4;
+        int maxZ = MathHelper.floor(scene.z() + radius) >> 4;
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
                 if (!client.world.getChunkManager().isChunkLoaded(x, z)) {
@@ -1260,7 +1263,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         if (allowed && System.currentTimeMillis() - lastMessage > 8_000) {
             revokeServerAccess("导播服务响应超时");
         }
-        if (client.currentScreen != null || observeState == ObserveState.NOTICE) {
+        if (client.currentScreen != null || observeState == ObserveState.NOTICE || sceneArrival != null) {
             player.setVelocity(Vec3d.ZERO);
             return;
         }
@@ -1371,7 +1374,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         return running;
     }
 
-    boolean isRunning() {
+    public boolean isRunning() {
         return running;
     }
 
@@ -1464,7 +1467,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             state.add("camera", JsonNull.INSTANCE);
         }
         state.addProperty("motionPaused", running && (client.currentScreen != null || client.isPaused()
-                || observeState == ObserveState.NOTICE || !canOperate(client)));
+                || observeState == ObserveState.NOTICE || sceneArrival != null || !canOperate(client)));
+        state.addProperty("sceneArriving", sceneArrival != null);
         JsonObject observation = new JsonObject();
         observation.addProperty("state", remoteAllowed ? observeState.name() : ObserveState.ENDED.name());
         observation.addProperty("targetId", !remoteAllowed || requestedTarget == null ? null : requestedTarget.toString());
@@ -1601,7 +1605,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         capabilities.addProperty("mapImport", true);
         capabilities.addProperty("heatmap", false);
         capabilities.addProperty("aiStrategy", true);
-        capabilities.addProperty("teleport", false);
+        capabilities.addProperty("teleport", true);
         state.add("capabilities", capabilities);
         return state.toString();
     }
@@ -1789,7 +1793,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     }
                     try {
                         showcaseQueue.adjust(entryId, deltaSeconds, System.currentTimeMillis(),
-                                !running || client.currentScreen != null || client.isPaused());
+                                !running || client.currentScreen != null || client.isPaused() || sceneArrival != null);
                     } catch (IllegalArgumentException exception) {
                         // These domain errors contain only fixed queue messages, never command contents or credentials.
                         status = exception.getMessage();

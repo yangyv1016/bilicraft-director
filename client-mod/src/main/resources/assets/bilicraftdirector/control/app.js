@@ -305,15 +305,20 @@ function applyState(next) {
         + " · 已同步 " + element("lastUpdate").textContent;
     renderAccount();
     element("mapWorldLabel").textContent = next.world || "未进入世界";
-    element("runState").textContent = next.running ? (next.motionPaused ? "移动暂停" : "运行中") : "已停止";
+    element("runState").textContent = next.running ? (next.sceneArriving ? "前往场景" : next.motionPaused ? "移动暂停" : "运行中") : "已停止";
     element("runState").classList.toggle("online", next.running && !next.motionPaused);
     element("runState").classList.toggle("warning", next.running && next.motionPaused);
     element("runtimeStatus").textContent = next.status;
-    element("motionState").textContent = !next.running ? "未运行" : next.motionPaused ? "已暂停，请查看执行状态" : "本地运镜";
+    element("motionState").textContent = !next.running ? "未运行" : next.sceneArriving ? "等待传送到位和区块加载"
+        : next.motionPaused ? "已暂停，请查看执行状态" : "本地运镜";
     const observation = next.observation;
     element("observationState").textContent = observation.state === "NOTICE" ? "私密预告中"
         : observation.state === "FOLLOWING" ? "已获准跟随" : "未进行";
     updateCountdown();
+    element("teleportCapability").textContent = next.capabilities.teleport ? "同世界 OP 传送" : "当前客户端未接入";
+    element("teleportRulesStatus").textContent = next.capabilities.teleport
+        ? "由本人发起同世界场景传送；到位并加载后开始运镜，失败或超时跳过"
+        : "当前客户端尚未接入场景传送";
     element("targetSource").textContent = !next.connected ? "保留最后同步视图"
         : next.allowed ? "当前世界 · 已授权候选" : "本地模式 · 景点、巡游与队列可用 · 玩家跟随未授权";
     element("cameraActual").textContent = "当前：" + cameraModeNames[next.settings.mode] + " · 距离 " + next.settings.radius
@@ -662,9 +667,9 @@ function renderSelection() {
     element("selectionRadius").textContent = target && target.kind !== "PLAYER" ? target.radius + " 格" : "—";
     element("selectionStatus").textContent = !target ? "玩家目标始终经过 15 秒私密预告。"
         : !state.targets.some((candidate) => candidate.id === target.id) ? "此目标已不在当前候选中，请重新拉取。"
-            : !target.available ? "当前目标不可展示；可能超出已加载区域或权限已改变。"
+            : !target.available ? "当前目标不可展示；请检查当前世界、边界、排除区或玩家授权。"
                 : target.kind === "PLAYER" ? "发起后先私密预告 15 秒；玩家可拒绝或加入长期黑名单。"
-                    : "使用本地场景路径；不自动传送或加载远处区块。";
+                    : "远处或未加载场景由本账号发起传送，到位并加载后开始运镜。";
     element("entryDurationUnit").textContent = "秒";
     element("entryDuration").min = target?.kind === "PLAYER" ? "180" : "30";
     element("entryDuration").max = target?.kind === "PLAYER" ? "480" : "600";
