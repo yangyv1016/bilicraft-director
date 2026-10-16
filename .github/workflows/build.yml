@@ -1,0 +1,72 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Java 21 build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Build and test all modules
+        run: bash ./gradlew --no-daemon --console=plain build release
+
+      - name: Generate JAR checksums
+        working-directory: build/release
+        run: sha256sum bilicraft-director-client-*.jar bilicraft-director-server-*.jar > SHA256SUMS.txt
+
+      - name: Upload installation JARs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bilicraft-director-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            build/release/bilicraft-director-client-*.jar
+            build/release/bilicraft-director-server-*.jar
+            build/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            client-mod/build/reports/tests/test/
+            client-mod/build/test-results/test/*.xml
+            protocol/build/reports/tests/test/
+            protocol/build/test-results/test/*.xml
+            server-plugin/build/reports/tests/test/
+            server-plugin/build/test-results/test/*.xml
+          if-no-files-found: ignore
+          retention-days: 14

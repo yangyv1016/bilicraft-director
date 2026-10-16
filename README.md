@@ -33,6 +33,14 @@ build/release/bilicraft-director-server-0.1.0.jar
 
 依赖首次构建需要联网；如本机 Java 需要代理，在本机 Gradle 用户配置中设置，不将代理凭据或机器绝对路径写入工程。Wrapper 校验官方 Gradle 分发包 SHA-256。
 
+## 云端构建
+
+GitHub Actions 的 [Build and test](https://github.com/yangyv1016/bilicraft-director/actions/workflows/build.yml) 工作流在推送 `main`、向 `main` 提交 PR、推送 `v*` 标签时自动运行，也可在 Actions 页面点击 **Run workflow** 手动触发。
+
+工作流使用 Ubuntu 和 Temurin Java 21，校验 Gradle Wrapper、缓存 Gradle 依赖，并执行 `build release`，包含三个模块的单元测试。成功后可在运行详情的 **Artifacts** 下载 `bilicraft-director-运行编号-尝试次数`，内含双端安装 JAR 和 `SHA256SUMS.txt`，保留 30 天。测试报告独立保留 14 天，构建失败时也会上传已生成的报告。版本标签只触发构建，不自动发布 GitHub Release。
+
+云端构建不启动真实 Minecraft 客户端或 Paper 服务端，也不访问真实 AI 提供方；这些运行验证仍需单独执行。
+
 ## 安装与试用
 
 1. 将 server JAR 放入 Paper 的 `plugins/`。内部插件标识仍为 `BiliCraftAI`，已有配置、隐私目录和权限节点保留。首次启动会从旧 `config.yml` 导入默认世界；之后世界名单以 `plugins/BiliCraftAI/worlds.yml` 为准。
