@@ -1,6 +1,6 @@
 # BiliCraft 导播服务（第一阶段）
 
-安装 `bilicraft-director-server-0.1.0.jar` 到 Paper 1.21.11 的 `plugins/`，使用 Java 21。
+安装 `bilicraft-director-server-0.1.1.jar` 到 Paper 1.21.11 的 `plugins/`，使用 Java 21。
 首次运行检查旧配置 `plugins/BiliCraftDirector/config.yml` 的 `world-name`；首次迁移后，以 `worlds.yml` 中的世界 UUID 名单为权威。
 升级时先停服并移除旧版导播 JAR，避免同时加载两份插件。插件内部名为 `BiliCraftDirector`，命令为 `/director`，权限前缀为 `bilicraftdirector`。
 首次升级自动将 `plugins/BiliCraftAI/` 整体移动为 `plugins/BiliCraftDirector/`，包含配置、世界允许名单、地图映射、玩家黑名单与冷却。若新目录已存在且非空，插件停止服务并报告冲突，不覆盖或忽略旧隐私数据；先停服核对合并两份数据，再将旧目录移出 `plugins/`。

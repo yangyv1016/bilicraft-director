@@ -14,10 +14,10 @@ import java.util.Properties;
 
 final class CameraSettings {
     private final Path path;
-    CameraMotion.Mode mode = CameraMotion.Mode.AUTO;
-    double radius = 12;
+    CameraMotion.Mode mode = CameraMotion.Mode.ORBIT;
+    double radius = 136;
     double speed = 2.5;
-    double heightY = 80;
+    double heightY = 122;
     double playerHeightOffset = 4;
     double motionAmplitude = 8;
     double turnRateDegreesPerSecond = 30;
@@ -57,10 +57,10 @@ final class CameraSettings {
             try (Reader reader = Files.newBufferedReader(path)) {
                 properties.load(reader);
             }
-            double savedRadius = Double.parseDouble(properties.getProperty("camera.radius", "12"));
+            double savedRadius = Double.parseDouble(properties.getProperty("camera.radius", "136"));
             double savedSpeed = Double.parseDouble(properties.getProperty("camera.speed", "2.5"));
-            CameraMotion.Mode savedMode = CameraMotion.Mode.valueOf(properties.getProperty("camera.mode", "AUTO"));
-            double savedHeightY = Double.parseDouble(properties.getProperty("camera.height-y", "80"));
+            CameraMotion.Mode savedMode = CameraMotion.Mode.valueOf(properties.getProperty("camera.mode", "ORBIT"));
+            double savedHeightY = Double.parseDouble(properties.getProperty("camera.height-y", "122"));
             double savedPlayerHeight = Double.parseDouble(properties.getProperty("camera.player-height-offset",
                     properties.getProperty("camera.height-offset", "4")));
             double savedAmplitude = Double.parseDouble(properties.getProperty("camera.motion-amplitude", "8"));

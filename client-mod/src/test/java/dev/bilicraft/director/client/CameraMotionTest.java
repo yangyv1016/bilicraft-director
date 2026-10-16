@@ -19,6 +19,7 @@ class CameraMotionTest {
     private CameraSettings settings(CameraMotion.Mode mode) {
         CameraSettings settings = new CameraSettings(directory.resolve("camera.properties"));
         settings.mode = mode;
+        settings.radius = 12;
         settings.heightY = camera.y();
         return settings;
     }

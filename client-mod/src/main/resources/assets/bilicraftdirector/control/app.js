@@ -20,7 +20,7 @@ const commandNames = {
     start: "启动导播", stop: "停止导播", previous: "上一素材插播", queueSkip: "跳过当前",
     refresh: "拉取目标", mapRefresh: "拉取地图", mapSettings: "保存本机地图来源", show: "立即插播", camera: "调整运镜", ai: "保存 AI 配置", aiTest: "测试 AI 连接",
     queueAdd: "加入待播队列", queueRemove: "移除待播项", queueMove: "调整待播顺序", queueSettings: "保存队列配置",
-    queueAdjust: "调整排播时长"
+    queueAdjust: "调整排播时长", chatSend: "发送聊天"
 };
 const tokenStorageKey = "bilicraft-control-token";
 let sessionToken = location.hash.slice(1);
@@ -69,6 +69,11 @@ let mapFrame = 0;
 let drag = null;
 let queueSignature = "";
 let avatarSource = "";
+let consoleView = null;
+let chatSending = false;
+let chatSignature = "";
+let previousChatIds = new Set();
+let chatUnread = 0;
 
 function addLog(message, level = "info") {
     const entry = { message, level, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) };
@@ -169,6 +174,14 @@ function updateAvailability() {
     element("resetCamera").disabled = !state;
     element("resetQueueSettings").disabled = !state;
     element("resetAi").disabled = !state;
+    const canChat = Boolean(available && state.chat.connected);
+    element("chatInput").disabled = !canChat;
+    if (state) element("chatInput").maxLength = state.chat.maxLength;
+    element("chatSend").disabled = !canChat || busy || chatSending || !element("chatInput").value.trim();
+    element("chatSend").textContent = chatSending ? "发送中…" : "发送";
+    element("chatLength").textContent = element("chatInput").value.length + " / " + element("chatInput").maxLength;
+    element("chatStatus").textContent = !apiOnline ? "本机中控离线 · 草稿已保留"
+        : canChat ? "已连接游戏 · 使用当前登录账号发送" : "游戏未连接 · 连接后可发送";
 }
 
 function setConnection(online, message) {
@@ -220,7 +233,8 @@ function refreshState() {
         try {
             const next = await requestApi("/api/state");
             if (!next || !Array.isArray(next.targets) || !next.settings || !next.ai || !next.ai.profiles
-                || !next.queue || !Array.isArray(next.queue.pending) || !next.queue.settings) {
+                || !next.queue || !Array.isArray(next.queue.pending) || !next.queue.settings
+                || !next.chat || !Array.isArray(next.chat.messages)) {
                 throw new Error("本机状态格式不匹配，请重新打开中控");
             }
             applyState(next);
@@ -304,6 +318,7 @@ function applyState(next) {
     element("settingsConnection").textContent = (next.connected ? next.allowed ? "导播服务已授权" : "本地模式" : "游戏未连接")
         + " · 已同步 " + element("lastUpdate").textContent;
     renderAccount();
+    renderChat();
     element("mapWorldLabel").textContent = next.world || "未进入世界";
     element("runState").textContent = next.running ? (next.sceneArriving ? "前往场景" : next.motionPaused ? "移动暂停" : "运行中") : "已停止";
     element("runState").classList.toggle("online", next.running && !next.motionPaused);
@@ -390,6 +405,34 @@ function applyState(next) {
     }
     updateAvailability();
     scheduleMap();
+}
+
+function renderChat() {
+    const messages = state.chat.messages;
+    const signature = JSON.stringify(messages);
+    if (signature === chatSignature) return;
+    chatSignature = signature;
+    const list = element("chatMessages");
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 36;
+    const scrollTop = list.scrollTop;
+    chatUnread = consoleView === "chat" ? 0 : Math.min(messages.length,
+        chatUnread + messages.filter((message) => !previousChatIds.has(message.id)).length);
+    previousChatIds = new Set(messages.map((message) => message.id));
+    const fragment = document.createDocumentFragment();
+    for (const message of messages) {
+        const row = document.createElement("li");
+        const time = document.createElement("time");
+        time.textContent = new Date(message.receivedAt).toLocaleTimeString("zh-CN", { hour12: false });
+        const text = document.createElement("span");
+        text.textContent = message.text;
+        row.append(time, text);
+        fragment.append(row);
+    }
+    list.replaceChildren(fragment);
+    list.scrollTop = nearBottom ? list.scrollHeight : scrollTop;
+    element("chatEmpty").hidden = messages.length > 0;
+    element("chatUnread").textContent = String(chatUnread);
+    element("chatUnread").hidden = chatUnread === 0;
 }
 
 function updateCountdown() {
@@ -1135,10 +1178,45 @@ for (const [openId, closeId, selector] of [["openLibrary", "closeLibrary", ".tar
     element(openId).addEventListener("click", () => document.querySelector(selector).classList.toggle("open"));
     element(closeId).addEventListener("click", () => document.querySelector(selector).classList.remove("open"));
 }
-element("logToggle").addEventListener("click", () => {
-    const collapsed = element("logPanel").classList.toggle("collapsed");
-    document.body.classList.toggle("logs-expanded", !collapsed);
-    element("logToggle").setAttribute("aria-expanded", String(!collapsed));
+function setConsoleView(view) {
+    consoleView = consoleView === view ? null : view;
+    const chatOpen = consoleView === "chat";
+    const logOpen = consoleView === "log";
+    element("logPanel").classList.toggle("collapsed", !consoleView);
+    element("logPanel").classList.toggle("chat-expanded", chatOpen);
+    document.body.classList.toggle("logs-expanded", logOpen);
+    document.body.classList.toggle("chat-expanded", chatOpen);
+    element("chatPanel").hidden = !chatOpen;
+    element("commandLog").hidden = !logOpen;
+    element("logLatest").hidden = chatOpen;
+    element("clearLogs").hidden = chatOpen;
+    element("logToggle").setAttribute("aria-expanded", String(logOpen));
+    element("chatToggle").setAttribute("aria-expanded", String(chatOpen));
+    if (chatOpen) {
+        chatUnread = 0;
+        element("chatUnread").hidden = true;
+        element("chatMessages").scrollTop = element("chatMessages").scrollHeight;
+        if (!element("chatInput").disabled) element("chatInput").focus();
+    }
+}
+element("logToggle").addEventListener("click", () => setConsoleView("log"));
+element("chatToggle").addEventListener("click", () => setConsoleView("chat"));
+element("chatInput").addEventListener("input", updateAvailability);
+element("chatInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.isComposing) event.preventDefault();
+});
+element("chatForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (element("chatSend").disabled || !element("chatForm").reportValidity()) return;
+    const input = element("chatInput");
+    const message = input.value;
+    chatSending = true;
+    updateAvailability();
+    const result = await sendCommand({ action: "chatSend", message }, true);
+    if (result.ok && input.value === message) input.value = "";
+    chatSending = false;
+    updateAvailability();
+    if (!input.disabled) input.focus();
 });
 element("clearLogs").addEventListener("click", () => {
     logs.length = 0;

@@ -100,7 +100,7 @@ public final class DynmapMapClient implements AutoCloseable {
                 Result fresh;
                 String etag;
                 if (response.statusCode() == 304 && saved != null) {
-                    fresh = new Result(saved.result().scenes(), fetchedAt, "外链未变更，已确认缓存有效（HTTP 304）");
+                    fresh = new Result(saved.result().scenes(), saved.result().regions(), fetchedAt, "外链未变更，已确认缓存有效（HTTP 304）");
                     etag = saved.etag();
                 } else if (response.statusCode() == 200) {
                     fresh = parse(response.body(), key, fetchedAt);
@@ -148,6 +148,7 @@ public final class DynmapMapClient implements AutoCloseable {
             JsonObject sets = root.getAsJsonObject("sets");
             if (sets == null) throw new IllegalArgumentException("Missing sets");
             ArrayList<Message.SceneView> scenes = new ArrayList<>();
+            ArrayList<DynmapRegion> regions = new ArrayList<>();
             int examined = 0;
             int skipped = 0;
             String prefix = scenePrefix(source.baseUrl(), source.dynmapWorld(), source.worldKey());
@@ -164,6 +165,7 @@ public final class DynmapMapClient implements AutoCloseable {
                             double z;
                             double radius;
                             Message.SceneKind kind;
+                            ArrayList<DynmapRegion.Vertex> vertices = null;
                             if (section.equals("markers")) {
                                 x = number(fields.get("x")); y = number(fields.get("y")); z = number(fields.get("z"));
                                 radius = 12;
@@ -172,10 +174,12 @@ public final class DynmapMapClient implements AutoCloseable {
                                 JsonArray xs = fields.getAsJsonArray("x");
                                 JsonArray zs = fields.getAsJsonArray("z");
                                 if (xs.size() < 3 || xs.size() != zs.size()) throw new IllegalArgumentException("Invalid polygon");
+                                vertices = new ArrayList<>(xs.size());
                                 double minX = Double.POSITIVE_INFINITY, maxX = Double.NEGATIVE_INFINITY;
                                 double minZ = Double.POSITIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
                                 for (int index = 0; index < xs.size(); index++) {
                                     double pointX = number(xs.get(index)), pointZ = number(zs.get(index));
+                                    vertices.add(new DynmapRegion.Vertex(pointX, pointZ));
                                     minX = Math.min(minX, pointX); maxX = Math.max(maxX, pointX);
                                     minZ = Math.min(minZ, pointZ); maxZ = Math.max(maxZ, pointZ);
                                 }
@@ -191,19 +195,21 @@ public final class DynmapMapClient implements AutoCloseable {
                             String name = label.getAsString().replaceAll("(?is)<[^>]*>", " ")
                                     .replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<")
                                     .replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
+                                    .replaceAll("(?is)<[^>]*>", " ")
                                     .replaceAll("§.", "").replaceAll("[\\p{Cc}\\p{Cf}]", " ").replaceAll("\\s+", " ").strip();
                             if (name.isEmpty()) throw new IllegalArgumentException("Empty label");
                             if (name.codePointCount(0, name.length()) > 48) name = name.substring(0, name.offsetByCodePoints(0, 48));
                             if (!StandardCharsets.UTF_8.newEncoder().canEncode(name)) throw new IllegalArgumentException("Invalid label encoding");
-                            scenes.add(new Message.SceneView(prefix + digest(set.getKey() + "\n" + section + "\n" + marker.getKey()).substring(0, 24),
-                                    name, kind, source.worldKey(), x, y, z, radius));
+                            String id = prefix + digest(set.getKey() + "\n" + section + "\n" + marker.getKey()).substring(0, 24);
+                            if (vertices != null) regions.add(new DynmapRegion(id, name, source.worldKey(), vertices));
+                            scenes.add(new Message.SceneView(id, name, kind, source.worldKey(), x, y, z, radius));
                         } catch (IllegalArgumentException | IllegalStateException | NullPointerException exception) {
                             skipped++;
                         }
                     }
                 }
             }
-            return new Result(scenes, fetchedAt, "外链导入 " + scenes.size() + " 个候选" + (skipped == 0 ? "" : "，跳过 " + skipped + " 个无效标记"));
+            return new Result(scenes, regions, fetchedAt, "外链导入 " + scenes.size() + " 个候选" + (skipped == 0 ? "" : "，跳过 " + skipped + " 个无效标记"));
         } catch (RuntimeException | StackOverflowError exception) {
             throw new IOException("地图JSON格式无效；保留已有缓存");
         }
@@ -232,8 +238,11 @@ public final class DynmapMapClient implements AutoCloseable {
         executor.shutdownNow();
     }
 
-    public record Result(List<Message.SceneView> scenes, long fetchedAtEpochMillis, String note) {
-        public Result { scenes = List.copyOf(scenes); }
+    public record Result(List<Message.SceneView> scenes, List<DynmapRegion> regions, long fetchedAtEpochMillis, String note) {
+        public Result {
+            scenes = List.copyOf(scenes);
+            regions = List.copyOf(regions);
+        }
     }
 
     private record Cached(Result result, String etag) { }

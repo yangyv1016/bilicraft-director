@@ -13,6 +13,36 @@ class CameraSettingsTest {
     @TempDir Path directory;
 
     @Test
+    void freshConfigurationUsesTheRequestedOrbitPresetWithoutCreatingAFile() {
+        Path path = directory.resolve("camera.properties");
+        CameraSettings settings = new CameraSettings(path);
+        settings.load(LoggerFactory.getLogger(getClass()));
+
+        assertEquals(CameraMotion.Mode.ORBIT, settings.mode);
+        assertEquals(136, settings.radius);
+        assertEquals(2.5, settings.speed);
+        assertEquals(122, settings.heightY);
+        assertEquals(4, settings.playerHeightOffset);
+        assertEquals(8, settings.motionAmplitude);
+        assertEquals(30, settings.turnRateDegreesPerSecond);
+        assertFalse(Files.exists(path));
+    }
+
+    @Test
+    void missingSavedFieldsUseTheRequestedPresetWithoutOverwritingExplicitValues() throws Exception {
+        Path path = directory.resolve("camera.properties");
+        Files.writeString(path, "camera.speed=4\ncamera.player-height-offset=7\n");
+        CameraSettings settings = new CameraSettings(path);
+        settings.load(LoggerFactory.getLogger(getClass()));
+
+        assertEquals(CameraMotion.Mode.ORBIT, settings.mode);
+        assertEquals(136, settings.radius);
+        assertEquals(122, settings.heightY);
+        assertEquals(4, settings.speed);
+        assertEquals(7, settings.playerHeightOffset);
+    }
+
+    @Test
     void legacyCameraConfigurationMigratesWithSavedMotionParameters() throws Exception {
         Path legacy = directory.resolve("bilicraft-ai.properties");
         String configuration = "camera.mode=CRANE\ncamera.radius=18\ncamera.speed=4\n";
@@ -52,8 +82,8 @@ class CameraSettingsTest {
         settings.load(LoggerFactory.getLogger(getClass()));
         assertEquals(16, settings.radius);
         assertEquals(3.5, settings.speed);
-        assertEquals(CameraMotion.Mode.AUTO, settings.mode);
-        assertEquals(80, settings.heightY);
+        assertEquals(CameraMotion.Mode.ORBIT, settings.mode);
+        assertEquals(122, settings.heightY);
         assertEquals(4, settings.playerHeightOffset);
         assertEquals(8, settings.motionAmplitude);
         assertEquals(30, settings.turnRateDegreesPerSecond);
@@ -88,7 +118,7 @@ class CameraSettingsTest {
         Files.writeString(path, "camera.radius=20\ncamera.speed=4\ncamera.turn-rate=NaN\n");
         CameraSettings settings = new CameraSettings(path);
         settings.load(LoggerFactory.getLogger(getClass()));
-        assertEquals(12, settings.radius);
+        assertEquals(136, settings.radius);
         assertEquals(2.5, settings.speed);
     }
 
@@ -120,11 +150,11 @@ class CameraSettingsTest {
         settings.load(LoggerFactory.getLogger(getClass()));
 
         assertEquals(18, settings.radius);
-        assertEquals(80, settings.heightY);
+        assertEquals(122, settings.heightY);
         assertEquals(9, settings.playerHeightOffset);
         assertTrue(settings.save(LoggerFactory.getLogger(getClass())));
         String saved = Files.readString(path);
-        assertTrue(saved.contains("camera.height-y=80.0"));
+        assertTrue(saved.contains("camera.height-y=122.0"));
         assertTrue(saved.contains("camera.player-height-offset=9.0"));
         assertFalse(saved.contains("camera.height-offset="));
     }

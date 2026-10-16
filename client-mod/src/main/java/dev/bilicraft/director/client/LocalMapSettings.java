@@ -14,8 +14,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Properties;
 
-/** Explicit local external-map mappings, isolated by the exact server address and world key. */
+/** Exact local overrides, with a BiliCraft overworld mapping when no override is saved. */
 final class LocalMapSettings {
+    static final Profile BILICRAFT_DEFAULT = new Profile("https://map.bilicraft.com/s2/hyperion/", "Paralon");
     private final Path directory;
 
     LocalMapSettings(Path directory) {
@@ -27,7 +28,7 @@ final class LocalMapSettings {
         try (Reader reader = Files.newBufferedReader(pathFor(serverAddress, worldKey))) {
             properties.load(reader);
         } catch (NoSuchFileException exception) {
-            return new Profile("", "");
+            return defaultProfile(serverAddress, worldKey);
         }
         if (!properties.stringPropertyNames().equals(java.util.Set.of("base-url", "dynmap-world"))) {
             throw new IllegalArgumentException("Invalid local map configuration fields");
@@ -40,7 +41,7 @@ final class LocalMapSettings {
         Path path = pathFor(serverAddress, worldKey);
         if (!profile.configured()) {
             Files.deleteIfExists(path);
-            return profile;
+            return defaultProfile(serverAddress, worldKey);
         }
         Properties properties = new Properties();
         properties.setProperty("base-url", profile.baseUrl());
@@ -60,6 +61,22 @@ final class LocalMapSettings {
             Files.deleteIfExists(temporary);
         }
         return profile;
+    }
+
+    static Profile defaultProfile(String serverAddress, String worldKey) {
+        int separator = serverAddress.indexOf(':');
+        String host = separator < 0 ? serverAddress : serverAddress.substring(0, separator);
+        if (!worldKey.equals("minecraft:overworld")
+                || (!host.equalsIgnoreCase("mc.bilicraft.com") && !host.equalsIgnoreCase("bilicraft.com"))) {
+            return new Profile("", "");
+        }
+        if (separator >= 0) {
+            String port = serverAddress.substring(separator + 1);
+            if (!port.matches("[0-9]{1,5}") || Integer.parseInt(port) < 1 || Integer.parseInt(port) > 65_535) {
+                return new Profile("", "");
+            }
+        }
+        return BILICRAFT_DEFAULT;
     }
 
     private Path pathFor(String serverAddress, String worldKey) {

@@ -31,6 +31,9 @@ body  {
 body.logs-expanded  {
     --log-height:181px;
 }
+body.chat-expanded  {
+    --log-height:240px;
+}
 button,input  {
     font:inherit
 }
@@ -1135,6 +1138,96 @@ input::placeholder  {
 .log-panel.collapsed  {
     height:36px
 }
+.log-panel.chat-expanded  {
+    height:240px
+}
+.chat-panel  {
+    display:flex;
+    flex-direction:column;
+    flex:1;
+    min-height:0;
+    padding:0 18px 12px
+}
+.chat-status-row  {
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+    color:var(--muted);
+    font-size:10px;
+    padding:2px 0 7px
+}
+.chat-history  {
+    flex:1;
+    min-height:0;
+    position:relative;
+    border-top:1px solid var(--border)
+}
+.chat-messages  {
+    height:100%;
+    overflow:auto;
+    list-style:none;
+    margin:0;
+    padding:5px 0 8px;
+    scrollbar-gutter:stable
+}
+.chat-messages li  {
+    display:grid;
+    grid-template-columns:66px minmax(0,1fr);
+    gap:10px;
+    padding:3px 0;
+    line-height:1.5
+}
+.chat-messages time  {
+    font:10px/1.95 Consolas,monospace;
+    color:#829a7c
+}
+.chat-messages li>span  {
+    overflow-wrap:anywhere;
+    white-space:pre-wrap;
+    user-select:text
+}
+.chat-empty  {
+    position:absolute;
+    inset:0;
+    display:grid;
+    place-items:center;
+    color:var(--muted);
+    font-size:11px;
+    pointer-events:none
+}
+.chat-form  {
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding-top:8px
+}
+.chat-input-label  {
+    color:var(--muted);
+    font-size:11px;
+    white-space:nowrap
+}
+.chat-form input  {
+    flex:1;
+    min-width:0;
+    height:32px;
+    border:1px solid #465a3e;
+    border-radius:4px;
+    background:#0f1812;
+    color:var(--text);
+    padding:6px 10px
+}
+.chat-form input:disabled  {
+    opacity:.5
+}
+.chat-length  {
+    color:var(--muted);
+    font-size:10px;
+    font-variant-numeric:tabular-nums;
+    white-space:nowrap
+}
+.log-toggle[aria-expanded="true"]  {
+    color:var(--accent)
+}
 .log-heading  {
     min-height:35px;
     display:flex;
@@ -1995,6 +2088,15 @@ input::placeholder  {
     }
 }
 @media(max-width:520px)  {
+    .chat-panel  {
+        padding:0 12px 10px
+    }
+    .chat-status-row>span:last-child,.chat-input-label  {
+        display:none
+    }
+    .chat-form  {
+        gap:7px
+    }
     .rail  {
         width:50px
     }

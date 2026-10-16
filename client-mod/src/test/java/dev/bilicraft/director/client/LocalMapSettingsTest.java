@@ -25,6 +25,50 @@ class LocalMapSettingsTest {
     }
 
     @Test
+    void bilicraftOverworldUsesTheBuiltInMappingWithoutWritingConfiguration() throws IOException {
+        Path missing = directory.resolve("missing");
+        LocalMapSettings settings = new LocalMapSettings(missing);
+        LocalMapSettings.Profile expected = new LocalMapSettings.Profile("https://map.bilicraft.com/s2/hyperion/", "Paralon");
+        for (String server : List.of("mc.bilicraft.com", "mc.bilicraft.com:25577", "bilicraft.com",
+                "bilicraft.com:25565", "MC.BILICRAFT.COM:25577", "bilicraft.com:65535")) {
+            assertEquals(expected, settings.load(server, "minecraft:overworld"), server);
+        }
+        assertFalse(Files.exists(missing));
+    }
+
+    @Test
+    void builtInMappingNeverLeaksIntoOtherServersWorldsOrMalformedAddresses() throws IOException {
+        LocalMapSettings settings = new LocalMapSettings(directory);
+        for (String server : List.of("server.example", "notbilicraft.com", "mc.bilicraft.com.example",
+                "other.bilicraft.com", "https://mc.bilicraft.com", "mc.bilicraft.com/",
+                "mc.bilicraft.com:", "mc.bilicraft.com:0", "mc.bilicraft.com:65536",
+                "mc.bilicraft.com:25577:25565", "bilicraft.com:port")) {
+            assertFalse(settings.load(server, "minecraft:overworld").configured(), server);
+        }
+        for (String world : List.of("minecraft:the_nether", "minecraft:the_end", "minecraft:artist", "overworld")) {
+            assertFalse(settings.load("mc.bilicraft.com:25577", world).configured(), world);
+        }
+    }
+
+    @Test
+    void explicitBilicraftMappingWinsAndClearingRestoresTheBuiltInDefaultImmediately() throws IOException {
+        LocalMapSettings settings = new LocalMapSettings(directory);
+        String server = "mc.bilicraft.com:25577";
+        String world = "minecraft:overworld";
+        LocalMapSettings.Profile custom = settings.save(server, world, "https://other.example/map/", "Custom");
+
+        assertEquals(custom, settings.load(server, world));
+        assertEquals("Paralon", settings.load("mc.bilicraft.com:25565", world).dynmapWorld());
+        assertEquals("Paralon", settings.load("bilicraft.com:25577", world).dynmapWorld());
+        assertEquals("Paralon", settings.save(server, world, "", "").dynmapWorld());
+        assertEquals(new LocalMapSettings.Profile("https://map.bilicraft.com/s2/hyperion/", "Paralon"),
+                settings.load(server, world));
+        try (var paths = Files.list(directory)) {
+            assertEquals(0, paths.count(), "clearing removes the exact local override rather than persisting the default");
+        }
+    }
+
+    @Test
     void exactServerPortAndWorldAreIsolatedAndSurviveReload() throws IOException {
         LocalMapSettings settings = new LocalMapSettings(directory);
         settings.save("server.example:25565", "minecraft:hyperionvoid", " https://map.example/hyperion ", " HyperionVoid ");

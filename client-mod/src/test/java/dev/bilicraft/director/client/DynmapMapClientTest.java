@@ -71,6 +71,16 @@ class DynmapMapClientTest {
         assertNotEquals(DynmapMapClient.scenePrefix(base, "Paralon", WORLD), DynmapMapClient.scenePrefix(base, "Paralon", "minecraft:the_nether"));
         assertSame(result, client.getCache(base, "Paralon", WORLD));
         assertThrows(UnsupportedOperationException.class, () -> result.scenes().clear());
+        assertEquals(1, result.regions().size());
+        DynmapRegion region = result.regions().getFirst();
+        assertEquals(area.id(), region.id());
+        assertEquals(area.name(), region.name());
+        assertEquals(WORLD, region.world());
+        assertEquals(4, region.vertices().size());
+        assertEquals(12_000, region.area());
+        assertTrue(region.contains(0, 50));
+        assertFalse(region.contains(121, 50));
+        assertThrows(UnsupportedOperationException.class, () -> result.regions().clear());
     }
 
     @Test
@@ -83,6 +93,7 @@ class DynmapMapClientTest {
         DynmapMapClient.Result checked = client.fetch(base, "Paralon", WORLD).get();
         assertEquals("\"map-v1\"", condition.get());
         assertEquals(first.scenes(), checked.scenes());
+        assertEquals(first.regions(), checked.regions());
         assertEquals(clock.get(), checked.fetchedAtEpochMillis());
         assertTrue(checked.note().contains("304"));
     }
@@ -158,5 +169,49 @@ class DynmapMapClientTest {
         assertEquals(2, result.scenes().size());
         assertTrue(result.note().contains("跳过 1"));
         assertTrue(result.scenes().stream().allMatch(scene -> StandardCharsets.UTF_8.newEncoder().canEncode(scene.name())));
+    }
+
+    @Test
+    void pointMarkersAndMissingAreasNeverInventCoverageForTheNearestScene() throws Exception {
+        body.set("""
+                {"sets":{"s":{"markers":{"station":{"x":5,"y":70,"z":5,"label":"车站"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(1, result.scenes().size());
+        assertTrue(result.regions().isEmpty());
+        assertNull(DynmapRegion.locate(result.regions(), WORLD, 5, 5));
+        assertNull(DynmapRegion.locate(result.regions(), WORLD, 1_000, 1_000));
+    }
+
+    @Test
+    void actualConcaveAreasPreserveGeometryAndStripHtmlColorsAndControlsFromBothLabels() throws Exception {
+        body.set("""
+                {"sets":{"s":{"areas":{"oldTown":{"x":[0,10,10,4,4,0],"z":[0,0,4,4,10,10],
+                "ytop":100,"ybottom":60,"label":"<b>§a市区</b> &lt;i&gt;§l旧城&lt;/i&gt;\\u0001"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals("市区 旧城", result.scenes().getFirst().name());
+        DynmapRegion region = result.regions().getFirst();
+        assertEquals("市区 旧城", region.name());
+        assertEquals(6, region.vertices().size());
+        assertSame(region, DynmapRegion.locate(result.regions(), WORLD, 2, 8));
+        assertSame(region, DynmapRegion.locate(result.regions(), WORLD, 4, 7));
+        assertNull(DynmapRegion.locate(result.regions(), WORLD, 7, 7));
+        assertNull(DynmapRegion.locate(result.regions(), "minecraft:the_nether", 2, 8));
+    }
+
+    @Test
+    void malformedAndDegenerateAreasAreSkippedWithoutPoisoningValidPointMarkers() throws Exception {
+        body.set("""
+                {"sets":{"s":{"markers":{"point":{"x":1,"y":70,"z":2,"label":"保留景点"}},"areas":{
+                "mismatch":{"x":[0,10,0],"z":[0,10],"ytop":80,"ybottom":60,"label":"无效"},
+                "line":{"x":[0,1,2],"z":[0,1,2],"ytop":80,"ybottom":60,"label":"直线"},
+                "infinite":{"x":[0,1e999,0],"z":[0,0,10],"ytop":80,"ybottom":60,"label":"无效"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(1, result.scenes().size());
+        assertEquals("保留景点", result.scenes().getFirst().name());
+        assertTrue(result.regions().isEmpty());
+        assertTrue(result.note().contains("跳过 3"));
     }
 }

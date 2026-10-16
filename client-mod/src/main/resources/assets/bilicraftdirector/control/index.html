@@ -287,7 +287,7 @@
                                 <select id="liveCameraMode" aria-label="实时运镜模式" disabled>
                                     <option value="AUTO">自动巡游</option>
                                     <option value="FOLLOW">后侧跟拍</option>
-                                    <option value="ORBIT">环绕</option>
+                                    <option value="ORBIT" selected>环绕</option>
                                     <option value="DOLLY">推进 / 拉远</option>
                                     <option value="TRUCK">横移</option>
                                     <option value="CRANE">升降</option>
@@ -298,9 +298,9 @@
                                 <button id="saveLiveCamera" class="button compact" disabled>保存当前运镜</button>
                             </div>
                             <div class="live-camera-sliders">
-                                <label>距离 <output id="liveRadiusValue">12 格</output><input id="liveRadius" data-camera-setting="radius" aria-label="实时镜头距离" type="range" min="6" max="256" step="0.5" value="12" disabled></label>
+                                <label>距离 <output id="liveRadiusValue">136 格</output><input id="liveRadius" data-camera-setting="radius" aria-label="实时镜头距离" type="range" min="6" max="256" step="0.5" value="136" disabled></label>
                                 <label>速度 <output id="liveSpeedValue">2.5 格/秒</output><input id="liveSpeed" data-camera-setting="speed" aria-label="实时移动速度" type="range" min="0.5" max="5" step="0.1" value="2.5" disabled></label>
-                                <label>场景 Y <output id="liveHeightYValue">80</output><input id="liveHeightY" data-camera-setting="heightY" aria-label="实时场景绝对 Y 坐标" type="range" min="-64" max="256" step="0.5" value="80" disabled></label>
+                                <label>场景 Y <output id="liveHeightYValue">122</output><input id="liveHeightY" data-camera-setting="heightY" aria-label="实时场景绝对 Y 坐标" type="range" min="-64" max="256" step="0.5" value="122" disabled></label>
                                 <label>跟拍高度 <output id="livePlayerHeightOffsetValue">4 格</output><input id="livePlayerHeightOffset" data-camera-setting="playerHeightOffset" aria-label="实时玩家跟拍高度偏移" type="range" min="1" max="12" step="0.5" value="4" disabled></label>
                                 <label>幅度 <output id="liveMotionAmplitudeValue">8 格</output><input id="liveMotionAmplitude" data-camera-setting="motionAmplitude" aria-label="实时运动幅度" type="range" min="2" max="24" step="0.5" value="8" disabled></label>
                                 <label>转向 <output id="liveTurnRateDegreesPerSecondValue">30 度/秒</output><input id="liveTurnRateDegreesPerSecond" data-camera-setting="turnRateDegreesPerSecond" aria-label="实时转向速度" type="range" min="6" max="80" step="1" value="30" disabled></label>
@@ -399,7 +399,7 @@
                                     <select id="cameraMode" class="camera-mode-select">
                                         <option value="AUTO">自动 · 区域巡游 / 静止环绕 / 移动跟拍</option>
                                         <option value="FOLLOW">跟拍 · 保持目标后侧机位</option>
-                                        <option value="ORBIT">环绕 · 围绕目标缓慢旋转</option>
+                                        <option value="ORBIT" selected>环绕 · 围绕目标缓慢旋转</option>
                                         <option value="DOLLY">推进 / 拉远 · 往返改变距离</option>
                                         <option value="TRUCK">横移 · 沿目标侧面移动</option>
                                         <option value="CRANE">升降 · 保持水平机位上下移动</option>
@@ -410,8 +410,8 @@
                                     <label class="slider-label" for="radiusRange">镜头距离 <span>格</span>
                                     </label>
                                     <div class="slider-control">
-                                        <input id="radiusRange" type="range" min="6" max="256" step="1" value="12">
-                                        <input id="radiusNumber" type="number" min="6" max="256" step="any" required value="12" aria-label="镜头距离数值">
+                                        <input id="radiusRange" type="range" min="6" max="256" step="1" value="136">
+                                        <input id="radiusNumber" type="number" min="6" max="256" step="any" required value="136" aria-label="镜头距离数值">
                                     </div>
                                     <label class="slider-label" for="speedRange">移动速度 <span>格 / 秒</span>
                                     </label>
@@ -421,10 +421,10 @@
                                     </div>
                                     <label class="slider-label" for="heightYRange">场景绝对 Y 坐标</label>
                                     <div class="slider-control">
-                                        <input id="heightYRange" type="range" min="-64" max="256" step="0.5" value="80">
-                                        <input id="heightYNumber" type="number" min="-64" max="256" step="any" required value="80" aria-label="场景绝对 Y 坐标数值">
+                                        <input id="heightYRange" type="range" min="-64" max="256" step="0.5" value="122">
+                                        <input id="heightYNumber" type="number" min="-64" max="256" step="any" required value="122" aria-label="场景绝对 Y 坐标数值">
                                     </div>
-                                    <p class="field-help">填 120 即机位 Y=120，不叠加景点海拔；升降运镜在此 Y 基准附近运动。</p>
+                                    <p class="field-help">默认机位 Y=122，不叠加景点海拔；升降运镜在此 Y 基准附近运动。</p>
                                     <label class="slider-label" for="playerHeightOffsetRange">玩家跟拍高度偏移 <span>格</span></label>
                                     <div class="slider-control">
                                         <input id="playerHeightOffsetRange" type="range" min="1" max="12" step="0.5" value="4">
@@ -450,6 +450,7 @@
                             </section>
                             <aside class="configuration-notes">
                                 <h3>应用范围</h3>
+                                <p>默认使用环绕：距离 136 格、速度 2.5 格 / 秒、场景 Y=122、跟拍高度 4 格、幅度 8 格、转向 30 度 / 秒。已保存的参数优先。</p>
                                 <p>应用并保存后，由 Mod 的同一运镜入口执行。不会启动已经停止的导播。</p>
                                 <dl>
                                     <dt>镜头距离</dt>
@@ -457,7 +458,7 @@
                                     <dt>移动速度</dt>
                                     <dd>0.5–5 格 / 秒</dd>
                                     <dt>高度与运动幅度</dt>
-                                    <dd>场景绝对 Y 为 −64–256，默认 80，机位仍须位于当前世界高度范围内。玩家跟拍高度为 1–12 格，默认 4 格，随玩家升降。运动幅度仍为 2–24 格。</dd>
+                                    <dd>场景绝对 Y 为 −64–256，默认 122，机位仍须位于当前世界高度范围内。玩家跟拍高度为 1–12 格，默认 4 格，随玩家升降。运动幅度仍为 2–24 格。</dd>
                                     <dt>转向速度</dt>
                                     <dd>6–80 度 / 秒，越低转头越舒缓。移动速度与转头速度独立调整。</dd>
                                 </dl>
@@ -709,9 +710,14 @@
                 </section>
             </main>
         </div>
-        <section id="logPanel" class="log-panel collapsed" aria-label="命令记录">
+        <section id="logPanel" class="log-panel collapsed" aria-label="游戏聊天与命令记录">
             <div class="log-heading">
-                <button id="logToggle" class="log-toggle" aria-expanded="false">
+                <button id="chatToggle" class="log-toggle" aria-expanded="false" aria-controls="chatPanel">
+                    <span class="chevron">⌃</span>
+                    <strong>游戏聊天</strong>
+                    <span id="chatUnread" class="count" hidden>0</span>
+                </button>
+                <button id="logToggle" class="log-toggle" aria-expanded="false" aria-controls="commandLog">
                     <span class="chevron">⌃</span>
                     <strong>命令记录</strong>
                     <span id="logCount" class="count">0</span>
@@ -719,7 +725,23 @@
                 <span id="logLatest" class="log-latest">本地会话记录，不记录配对信息与密钥</span>
                 <button id="clearLogs" class="text-button">清空</button>
             </div>
-            <ol id="commandLog" class="command-log">
+            <div id="chatPanel" class="chat-panel" hidden>
+                <div class="chat-status-row">
+                    <span id="chatStatus">等待本机连接</span>
+                    <span>本次游戏会话最多保留 100 条消息，不写入磁盘</span>
+                </div>
+                <div class="chat-history">
+                    <ol id="chatMessages" class="chat-messages" role="log" aria-label="游戏聊天消息" aria-live="polite" aria-relevant="additions text"></ol>
+                    <p id="chatEmpty" class="chat-empty">暂无游戏消息。普通聊天和 /命令均可在下方发送。</p>
+                </div>
+                <form id="chatForm" class="chat-form">
+                    <label class="chat-input-label" for="chatInput">消息或命令</label>
+                    <input id="chatInput" type="text" maxlength="256" autocomplete="off" spellcheck="false" placeholder="输入聊天消息或 /命令，按 Enter 发送" disabled>
+                    <span id="chatLength" class="chat-length">0 / 256</span>
+                    <button id="chatSend" class="button compact accent" type="submit" disabled>发送</button>
+                </form>
+            </div>
+            <ol id="commandLog" class="command-log" hidden>
             </ol>
         </section>
         <div id="feedback" class="feedback" role="status" aria-live="polite" hidden>
