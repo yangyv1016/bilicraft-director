@@ -93,8 +93,10 @@ WebUI 的地图配置按精确服务器地址与世界保存本机 URL、Dynmap 
 
 
 `ConnectionSession`区分新JOIN、首次就绪、当前就绪和待重连。Fabric的DISCONNECT可能从Netty的channelInactive触发，
-控制器用client.execute将清理和重连意图切回客户端主线程，并排除已切换到新handler的旧回调。
-收到DISCONNECT后旧世界仍存在时不会自动恢复，只有新的JOIN可以开始就绪检测；断线界面首试10秒，失败每30秒再试。
+网络回调只将handler放入独立的ConcurrentLinkedQueue，客户端tick先取出通知，再执行清理和重连状态更新，
+并排除已切换到新handler的旧回调。不使用client.execute：Minecraft断线清理会调用cancelTasks，可能丢弃排队的通知。
+收到DISCONNECT后旧世界仍存在时不会自动恢复，只有新的JOIN可以开始就绪检测；断线界面首试10秒，失败每30秒再试，无次数上限。
+重连后在世界就绪前再次断线也保留恢复意图，按失败后30秒重试。
 标题/服务器列表取消重连，进度、连接等临时界面保留状态，手动停止取消。恢复仍要求真实观察者模式。
 
 `ClientConnectionMixin`只观察原版发出的ResourcePackStatusC2SPacket：ACCEPTED/DOWNLOADED保持待完成，

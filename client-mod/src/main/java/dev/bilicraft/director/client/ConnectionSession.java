@@ -12,12 +12,12 @@ final class ConnectionSession {
     private long nextAttemptAt;
 
     void disconnected(boolean wasRunning, long now) {
+        nextAttemptAt = now + (reconnectPending ? 30_000 : 10_000);
         reconnectPending |= wasRunning;
         joined = false;
         ready = false;
         setupReady = false;
         stableSince = -1;
-        nextAttemptAt = now + 10_000;
     }
 
     void joined() {

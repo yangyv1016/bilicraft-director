@@ -38,6 +38,37 @@ class ConnectionSessionTest {
     }
 
     @Test
+    void serverRestartKeepsRetryingUntilAStableJoinWithoutAnAttemptLimit() {
+        ConnectionSession session = new ConnectionSession();
+        session.disconnected(true, 0);
+        for (int attempt = 0; attempt < 120; attempt++) {
+            long now = 10_000L + attempt * 30_000L;
+            assertTrue(session.takeReconnectAttempt(now, DISCONNECTED));
+            assertFalse(session.takeReconnectAttempt(now + 1_000, CONNECTING));
+            assertFalse(session.takeReconnectAttempt(now + 29_999, DISCONNECTED));
+            assertTrue(session.reconnectPending());
+        }
+        session.joined();
+        session.updateReady(3_610_000, true, false);
+        session.updateReady(3_612_000, true, false);
+        assertTrue(session.shouldResume());
+    }
+
+    @Test
+    void disconnectBeforeReconnectedWorldIsReadyRetainsIntentAndThirtySecondBackoff() {
+        ConnectionSession session = new ConnectionSession();
+        session.disconnected(true, 0);
+        assertTrue(session.takeReconnectAttempt(10_000, DISCONNECTED));
+        session.joined();
+        session.updateReady(12_000, true, true);
+        session.disconnected(false, 15_000);
+        assertTrue(session.reconnectPending());
+        assertFalse(session.shouldResume());
+        assertFalse(session.takeReconnectAttempt(44_999, DISCONNECTED));
+        assertTrue(session.takeReconnectAttempt(45_000, DISCONNECTED));
+    }
+
+    @Test
     void returningToMenuOrManuallyStoppingCancelsWithoutInterruptingAnOrdinaryJoin() {
         ConnectionSession session = new ConnectionSession();
         session.disconnected(false, 0);

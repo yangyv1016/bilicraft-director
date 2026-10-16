@@ -33,6 +33,7 @@ import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.gui.screen.multiplayer.ConnectScreen;
 import net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.network.ServerInfo;
 import net.minecraft.client.option.KeyBinding;
@@ -59,6 +60,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Supplier;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
@@ -124,6 +126,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private boolean running;
     private boolean allowed;
     private final ConnectionSession connectionSession = new ConnectionSession();
+    private final ConcurrentLinkedQueue<ClientPlayNetworkHandler> disconnectedHandlers = new ConcurrentLinkedQueue<>();
     private ServerInfo lastServer;
     private Message.MapSource deferredMapSource;
     private Runnable pendingMapCompletion;
@@ -270,35 +273,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     && !scene.id().startsWith("dynmap:")).toList();
             refreshMapTargets(client);
         });
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> client.execute(() -> {
-            if (client.getNetworkHandler() != null && client.getNetworkHandler() != handler) return;
-            connectionSession.disconnected(running, System.currentTimeMillis());
-            if (connectionSession.reconnectPending()) LOGGER.info("Director reconnect armed; waiting for disconnection screen");
-            shotTransition.clear();
-            idlePoint = null;
-            localChat.clear();
-            clearMapState();
-            invalidateAiDecision();
-            running = false;
-            allowed = false;
-            requestedTarget = null;
-            observeRequestTarget = null;
-            durationRequestTarget = null;
-            durationRequestEntryId = null;
-            observeState = ObserveState.ENDED;
-            targets = List.of();
-            cachedScenes = List.of();
-            activeScene = null;
-            sceneArrival = null;
-            showcaseQueue.resetSession();
-            lastSelectedTarget = null;
-            snapshotPending = false;
-            snapshotWorldKey = null;
-            businessRequestCancelled = false;
-            currentWorldKey = null;
-            targetSwitchDirection = 0;
-            status = connectionSession.reconnectPending() ? "连接中断，等待重连" : "未连接";
-        }));
+        // Minecraft clears its task queue during disconnect; client.execute can lose this notification.
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> disconnectedHandlers.add(handler));
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
             invalidateAiDecision();
@@ -327,6 +303,35 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void tick(MinecraftClient client) {
+        for (ClientPlayNetworkHandler handler; (handler = disconnectedHandlers.poll()) != null;) {
+            if (client.getNetworkHandler() != null && client.getNetworkHandler() != handler) continue;
+            connectionSession.disconnected(running, System.currentTimeMillis());
+            if (connectionSession.reconnectPending()) LOGGER.info("Director reconnect armed; waiting for disconnection screen");
+            shotTransition.clear();
+            idlePoint = null;
+            localChat.clear();
+            clearMapState();
+            invalidateAiDecision();
+            running = false;
+            allowed = false;
+            requestedTarget = null;
+            observeRequestTarget = null;
+            durationRequestTarget = null;
+            durationRequestEntryId = null;
+            observeState = ObserveState.ENDED;
+            targets = List.of();
+            cachedScenes = List.of();
+            activeScene = null;
+            sceneArrival = null;
+            showcaseQueue.resetSession();
+            lastSelectedTarget = null;
+            snapshotPending = false;
+            snapshotWorldKey = null;
+            businessRequestCancelled = false;
+            currentWorldKey = null;
+            targetSwitchDirection = 0;
+            status = connectionSession.reconnectPending() ? "连接中断，等待重连" : "未连接";
+        }
         synchronizeWorld(client);
         long now = System.currentTimeMillis();
         var networkHandler = client.getNetworkHandler();

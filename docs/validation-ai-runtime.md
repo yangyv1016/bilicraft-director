@@ -427,3 +427,37 @@ ACCEPTED/DOWNLOADED到终态的过程，不替换下载器、不获取或改写�
 最终`build release --offline`成功，客户端207项测试重跑通过，协议41项和服务端55项复用未变更的通过结果；
 发行客户端版本、内嵌协议版本及Mixin重映射方法签名另行核对。发布附件只使用v0.1.4标签云端构建成功后的产物，
 并核对测试报告、双端版本、SHA256以及服务端与v0.1.3附件的二进制一致性。
+
+## v0.1.4实测踢出后未重连：断线通知可能被清除（2026-10-17，修复进入v0.1.5）
+
+用户确认首次进服已恢复正常，并提供新的latest.log（修改时间00:55:55，约131MB）。
+日志加载bilicraftdirector 0.1.4；00:49:33记录服务器踢出，之后没有
+`Director reconnect armed`、`Director reconnect attempt started`或恢复导播日志；00:49:58出现下一次连接。
+不能仅凭这条后续连接记录认定是自动重连。大量Bobby/C2ME取消异常未作为本次重连失败的原因。
+
+核对本地对应版本Fabric networking源码及Minecraft 1.21.11字节码：Fabric在Netty channelInactive中
+调用handleDisconnect，并通过AtomicBoolean去重；此前控制器使用client.execute入队。
+MinecraftClient.disconnect(Screen,boolean,boolean)在销毁世界前调用cancelTasks，
+ThreadExecutor.cancelTasks直接clear其任务队列。通知若在此清理前入队就会丢失，后续Fabric回调已被去重。
+这是与日志缺少重连记录一致的源码时序漏洞；日志未记录该队列的实际调用轨迹，未声称已取得游戏内断点证据。
+
+修复将断线handler放入独立ConcurrentLinkedQueue，由客户端tick在世界同步前取出并执行原清理逻辑，
+保留新handler排除旧回调的检查；网络线程不读写Minecraft状态。首试10秒，失败每30秒且不设次数上限；
+重连已JOIN但资源包/世界尚未就绪时再次断线，也保留恢复意图并使用30秒退避。
+按yangyv-coding-check复核改动所在注册、tick、ConnectionSession及其直接调用，未增加无关包装或保护。
+
+本地build release --offline成功：客户端209项测试重跑通过，协议41项、服务端55项复用未改动的通过结果，
+0失败/错误/跳过。新增测试覆盖120次持续失败（约1小时）后仍能恢复，以及新连接未就绪再次断线的30秒重试。
+编译后javap确认实际断线回调使用独立队列add，tick先poll及更新断线状态、再同步世界；不再依赖client.execute交付断线通知。
+以上为编译、单元测试和静态字节码验证，未启动、重启、踢出或操作真实游戏，未实测线上重启恢复。
+上述诊断与修复时未改模块版本、服务端、协议、EMF/ETF或游戏配置，已有v0.1.4附件保持不变。
+
+## v0.1.5发布准备（2026-10-17）
+
+仅升级发布标签和客户端至0.1.5，服务端、协议模块保留0.1.2，通信协议仍为v6。
+复核断线回调只入独立队列、tick在世界同步前处理、旧handler排除、手动退出取消及新JOIN就绪后恢复的调用链；
+按yangyv-coding-check检查本次函数与直接相关逻辑，无需额外规范修复。
+最终build release --offline成功，客户端209项测试重跑通过，协议41项和服务端55项复用未改动的结果；
+共305项通过结果，0失败/错误/跳过。发布安装包为客户端0.1.5及服务端0.1.2，继续保留未实机验证的边界。
+附件仅使用v0.1.5标签对应云端构建通过后的产物；下载后核对测试XML、版本、内嵌协议、双端SHA256，
+并将服务端二进制与v0.1.4附件比对，确认未变更。
