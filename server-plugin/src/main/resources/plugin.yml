@@ -11,6 +11,9 @@ commands:
     description: 管理导播观察偏好、黑名单与自动巡游世界名单
     usage: /director stop | blacklist on/off | status
 permissions:
+  bilicraftdirector.idle.manage:
+    description: 允许设置、查看和清除当前世界的服务器挂机点
+    default: op
   bilicraftdirector.data.read:
     description: 允许当前已登录账号通过游戏连接读取摄影机数据并申请观察
     default: false

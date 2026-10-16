@@ -6,6 +6,8 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonParseException;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.FloatArgumentType;
 import dev.bilicraft.director.protocol.Codec;
 import dev.bilicraft.director.protocol.Message;
 import dev.bilicraft.director.protocol.Message.ObserveState;
@@ -14,6 +16,8 @@ import dev.bilicraft.director.protocol.Message.SceneView;
 import dev.bilicraft.director.protocol.Protocol;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
@@ -33,6 +37,7 @@ import net.minecraft.client.network.ServerInfo;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.StringHelper;
 import net.minecraft.util.Util;
@@ -54,6 +59,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
+
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
 
 public final class BiliCraftDirectorClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger("bilicraft-director");
@@ -108,6 +116,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private int mapSceneCount;
     private String mapDetail = "可配置本机地图外链，无需导播服务";
     private final ShowcaseQueue showcaseQueue = new ShowcaseQueue();
+    private IdlePoint idlePoint;
     private final QueueSettings queueSettings = new QueueSettings(FabricLoader.getInstance().getConfigDir()
             .resolve("bilicraft-director-queue.properties"));
     private long lastQueueRefreshAttempt;
@@ -142,7 +151,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private Vec3d orbitCenter;
     private Vec3d retreatDirection = Vec3d.ZERO;
     private long retreatUntil;
-    private long fadeStarted;
+    private final ShotTransition shotTransition = new ShotTransition();
     private Vec3d previousTargetPosition;
     private long targetMovingUntil;
     private KeyBinding toggleKey;
@@ -157,6 +166,26 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         instance = this;
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(literal("directoridle")
+                .then(literal("set").executes(context -> {
+                    ClientPlayerEntity player = context.getSource().getPlayer();
+                    return changeIdlePoint(context.getSource(), new IdlePoint(context.getSource().getWorld().getRegistryKey().getValue().toString(), player.getX(), player.getY(),
+                            player.getZ(), player.getYaw(), player.getPitch()));
+                }).then(argument("x", DoubleArgumentType.doubleArg(-30_000_000, 30_000_000))
+                        .then(argument("y", DoubleArgumentType.doubleArg())
+                                .then(argument("z", DoubleArgumentType.doubleArg(-30_000_000, 30_000_000))
+                                        .then(argument("yaw", FloatArgumentType.floatArg())
+                                                .then(argument("pitch", FloatArgumentType.floatArg(-90, 90)).executes(context ->
+                                                        changeIdlePoint(context.getSource(), new IdlePoint(context.getSource().getWorld().getRegistryKey().getValue().toString(),
+                                                                DoubleArgumentType.getDouble(context, "x"), DoubleArgumentType.getDouble(context, "y"),
+                                                                DoubleArgumentType.getDouble(context, "z"), FloatArgumentType.getFloat(context, "yaw"),
+                                                                FloatArgumentType.getFloat(context, "pitch"))))))))))
+                .then(literal("clear").executes(context -> changeIdlePoint(context.getSource(), null)))
+                .then(literal("info").executes(context -> {
+                    MinecraftClient client = MinecraftClient.getInstance();
+                    client.getNetworkHandler().sendChatCommand("director idle info");
+                    return 1;
+                }))));
         LocalMapSettings.Profile defaultMap = LocalMapSettings.BILICRAFT_DEFAULT;
         mapClient.fetch(defaultMap.baseUrl(), defaultMap.dynmapWorld(), "minecraft:overworld")
                 .whenComplete((result, error) -> {
@@ -225,6 +254,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (currentWorldKey != null) {
                 loadLocalMapSettings();
                 loadWorldPolicy();
+                idlePoint = null;
             }
             try {
                 cachedScenes = sceneCache.load(lastServer == null ? "singleplayer" : lastServer.address);
@@ -240,8 +270,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     .sorted(TARGET_ORDER).toList();
             serverScenes = cachedScenes.stream().filter(scene -> scene.world().equals(currentWorldKey)
                     && !scene.id().startsWith("dynmap:")).toList();
+            refreshMapTargets(client);
         });
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            shotTransition.clear();
+            idlePoint = null;
             localChat.clear();
             clearMapState();
             invalidateAiDecision();
@@ -278,10 +311,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             }
         });
         HudElementRegistry.addLast(Identifier.of("bilicraftdirector", "transition"), (context, tickCounter) -> {
-            long elapsed = System.currentTimeMillis() - fadeStarted;
-            if (running && fadeStarted != 0 && (sceneArrival != null || elapsed < 1_000)) {
-                double opacity = elapsed < 250 ? elapsed / 250.0
-                        : sceneArrival != null ? 1 : 1 - (elapsed - 250) / 750.0;
+            double opacity = shotTransition.opacity(System.currentTimeMillis(), sceneArrival != null && sceneArrival.teleport());
+            if (running && opacity > 0) {
                 int alpha = (int) (MathHelper.clamp(opacity, 0, 1) * 255);
                 context.fill(0, 0, context.getScaledWindowWidth(), context.getScaledWindowHeight(), alpha << 24);
             }
@@ -411,6 +442,15 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     requestMapSource(false);
                 }
             }
+        } else if (message instanceof Message.IdlePointSync sync) {
+            if (!sync.worldKey().equals(currentWorldKey)) return;
+            Message.IdlePose pose = sync.point();
+            IdlePoint point = pose == null ? null : new IdlePoint(sync.worldKey(), pose.x(), pose.y(), pose.z(), pose.yaw(), pose.pitch());
+            if (java.util.Objects.equals(idlePoint, point)) return;
+            if (idlePoint != null && idlePoint.matches(activeScene)) stop("服务端挂机点已更改，请重新选择展示目标");
+            idlePoint = point;
+            invalidateAiDecision();
+            refreshMapTargets(client);
         } else if (message instanceof Message.WorldPolicy policy) {
             if (!policy.worldKey().equals(currentWorldKey)) {
                 return;
@@ -524,7 +564,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 status = update.state() == ObserveState.NOTICE ? "已通知玩家，等待 15 秒" : "已获服务端观察许可";
                 stopMotion();
                 if (update.state() == ObserveState.FOLLOWING) {
-                    fadeStarted = System.currentTimeMillis();
+                    shotTransition.begin(System.currentTimeMillis());
                 }
             }
         } else if (message instanceof Message.DurationReply reply) {
@@ -671,6 +711,27 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
     }
 
+    private int changeIdlePoint(FabricClientCommandSource source, IdlePoint point) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        synchronizeWorld(client);
+        if (point != null && !idlePointAllowed(client, point)) {
+            source.sendError(Text.literal("挂机点必须位于当前世界边界、高度范围内，且不能在排除区内"));
+            return 0;
+        }
+        String command = point == null ? "director idle clear" : "director idle set "
+                + point.scene().x() + " " + point.scene().y() + " " + point.scene().z() + " " + point.yaw() + " " + point.pitch();
+        client.getNetworkHandler().sendChatCommand(command);
+        source.sendFeedback(Text.literal("挂机点请求已发送；等待服务器校验权限并保存"));
+        return 1;
+    }
+
+    private boolean idlePointAllowed(MinecraftClient client, IdlePoint point) {
+        SceneView scene = point.scene();
+        return scene.world().equals(currentWorldKey) && scene.y() >= client.world.getBottomY()
+                && scene.y() <= client.world.getTopYInclusive() && client.world.getWorldBorder().contains(scene.x(), scene.z())
+                && !insideExcludedRegion(new Vec3d(scene.x(), scene.y(), scene.z()));
+    }
+
     private boolean requestMapSource(boolean refresh) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (refresh && !canOperate(client)) {
@@ -749,12 +810,14 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         if (mapSource != null && mapSource.configured()) {
             mapCandidates = !mapLoaded
                     ? cachedScenes.stream().filter(scene -> scene.world().equals(currentWorldKey)
-                    && scene.id().startsWith(DynmapMapClient.scenePrefix(mapSource.baseUrl(), mapSource.dynmapWorld(), currentWorldKey))).toList()
+                    && scene.id().startsWith(DynmapMapClient.scenePrefix(mapSource.baseUrl(), mapSource.dynmapWorld(), currentWorldKey))
+                    && DynmapMapClient.eligibleName(scene.name())).toList()
                     : importedScenes;
         }
         List<SceneView> scenes = SceneLibrary.merge(currentWorldKey, serverScenes, mapCandidates);
         ArrayList<ShowcaseTarget> updated = new ArrayList<>(targets.stream().filter(target -> target instanceof ShowcaseTarget.Player).toList());
         scenes.forEach(scene -> updated.add(new ShowcaseTarget.Scene(scene)));
+        if (idlePoint != null) updated.add(new ShowcaseTarget.Scene(idlePoint.scene()));
         targets = updated.stream().sorted(TARGET_ORDER).toList();
         try {
             SceneLibrary.CacheSelection selection = SceneLibrary.selectCache(currentWorldKey, scenes, cachedScenes);
@@ -769,6 +832,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void revokeServerAccess(String reason) {
+        if (idlePoint != null) {
+            if (idlePoint.matches(activeScene)) stop("服务端挂机点暂不可用：" + reason);
+            idlePoint = null;
+            invalidateAiDecision();
+            refreshMapTargets(MinecraftClient.getInstance());
+        }
         mapMetadataPending = false;
         mapRefreshRequested = false;
         mapLoading = mapExternalPending;
@@ -942,7 +1011,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 activeScene = null;
                 sceneArrival = null;
                 retreatUntil = 0;
-                fadeStarted = 0;
+                shotTransition.clear();
                 stopMotion();
                 resetOrbit(client.player);
                 status = "当前世界不自动巡游或补点；手动待播项继续播放";
@@ -962,18 +1031,18 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 activeScene = scene.view();
                 showcaseQueue.refreshCurrentTarget(latest);
             }
-            boolean arrivingThisTick = sceneArrival != null;
+            boolean arrivingThisTick = sceneArrival != null || shotTransition.preparing();
             if (sceneArrival != null && targetValid && activeScene != null) {
                 if (!paused && sceneArrival.takeTeleportCommand(now)) {
-                    client.getNetworkHandler().sendChatCommand(sceneArrival.teleportCommand());
+                    String command = sceneArrival.teleportCommand();
+                    if (idlePoint != null && idlePoint.matches(activeScene)) command += " " + idlePoint.yaw() + " " + idlePoint.pitch();
+                    client.getNetworkHandler().sendChatCommand(command);
                     status = "已请求本人传送，等待到达并加载场景";
                 }
                 if (sceneArrival.arrived(new CameraMotion.Point(client.player.getX(), client.player.getY(),
                         client.player.getZ()), sceneChunksLoaded(client, sceneArrival.destination()))) {
-                    boolean teleported = sceneArrival.teleport();
                     sceneArrival = null;
                     cameraMotion.reset();
-                    fadeStarted = teleported ? now - 250 : 0;
                     status = "已到达，正在展示 " + activeScene.name();
                 } else if (sceneArrival.timedOut(now)) {
                     targetValid = false;
@@ -981,7 +1050,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                             : "平滑前往场景超时，已跳过；请检查路线边界与区块加载";
                 }
             }
-            if (targetValid && activeScene != null && sceneArrival == null && !paused) {
+            if (targetValid && activeScene != null && sceneArrival == null && !shotTransition.preparing() && !paused) {
                 showcaseQueue.markPlayed(current.target().id());
             }
             if (!targetValid || activeScene == null || showcaseQueue.tickScene(now, paused || arrivingThisTick)) {
@@ -990,7 +1059,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 activeScene = null;
                 sceneArrival = null;
-                if (arrivingThisTick && fadeStarted != 0) fadeStarted = now - 250;
+                if (arrivingThisTick) shotTransition.reveal(now);
                 showcaseQueue.finishCurrent();
                 stopMotion();
                 resetOrbit(client.player);
@@ -1057,6 +1126,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         showcaseQueue.finishCurrent();
         activeScene = null;
         sceneArrival = null;
+        shotTransition.clear();
         stopMotion();
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
@@ -1081,10 +1151,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         businessRequestCancelled = hasBusinessRequest();
         invalidateAiDecision();
         showcaseQueue.clear();
+        shotTransition.clear();
         lastQueueRefreshAttempt = 0;
         currentWorldKey = worldKey;
         loadLocalMapSettings();
         loadWorldPolicy();
+        idlePoint = null;
         serverScenes = cachedScenes.stream().filter(scene -> scene.world().equals(worldKey)
                 && !scene.id().startsWith("dynmap:")).toList();
         allowed = false;
@@ -1106,6 +1178,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         // Pending responses still own their business slot, but can no longer select an old-world target.
         targets = cachedScenes.stream().filter(scene -> scene.world().equals(currentWorldKey))
                 .map(scene -> (ShowcaseTarget) new ShowcaseTarget.Scene(scene)).sorted(TARGET_ORDER).toList();
+        refreshMapTargets(client);
         status = "世界已切换，使用当前世界本地导播并重新请求授权";
     }
 
@@ -1117,7 +1190,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             return false;
         }
         resumeAfterReconnect = false;
-        fadeStarted = 0;
+        shotTransition.clear();
         running = true;
         client.setCameraEntity(client.player);
         resetOrbit(client.player);
@@ -1127,6 +1200,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     public void stop(String reason) {
+        shotTransition.clear();
         invalidateAiDecision();
         if (requestedTarget != null || (observeRequestTarget != null && !businessRequestCancelled)) {
             send(new Message.Stop());
@@ -1280,6 +1354,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             }
             activeScene = null;
             sceneArrival = null;
+            shotTransition.clear();
             requestedTarget = player.view().id();
             observeRequestTarget = requestedTarget;
             businessRequestDeadline = System.currentTimeMillis() + 8_000;
@@ -1289,13 +1364,15 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "正在请求玩家展示预告";
         } else if (target instanceof ShowcaseTarget.Scene scene) {
             activeScene = scene.view();
-            sceneArrival = SceneArrival.plan(new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ()),
+            sceneArrival = idlePoint != null && idlePoint.matches(activeScene)
+                    ? new SceneArrival(idlePoint.position(), System.currentTimeMillis())
+                    : SceneArrival.plan(new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ()),
                     new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z()),
                     settings.radius, settings.heightY, settings.speed, System.currentTimeMillis());
             cameraMotion.reset();
             retreatUntil = 0;
-            if (sceneArrival.teleport()) stopMotion();
-            fadeStarted = sceneArrival.teleport() ? System.currentTimeMillis() : 0;
+            stopMotion();
+            shotTransition.begin(System.currentTimeMillis());
             status = (sceneArrival.teleport() ? "正在传送前往 " : "正在平滑前往 ") + scene.label();
         }
         lastSelectedTarget = target;
@@ -1314,6 +1391,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     && entity != null && entity.squaredDistanceTo(client.player) <= 96 * 96;
         }
         SceneView scene = ((ShowcaseTarget.Scene) target).view();
+        if (scene.id().equals(IdlePoint.SCENE_ID)) {
+            return allowed && idlePoint != null && idlePoint.matches(scene) && idlePointAllowed(client, idlePoint);
+        }
         double radius = Math.max(scene.radius(), settings.radius);
         if (worldExclusions().stream().anyMatch(region -> scene.x() + radius >= region.minX()
                 && scene.x() - radius <= region.maxX() && scene.z() + radius >= region.minZ()
@@ -1367,7 +1447,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 retreatDirection = new Vec3d(away.x, 0.25, away.z).normalize();
                 retreatUntil = System.currentTimeMillis() + 4_000;
-                fadeStarted = System.currentTimeMillis();
+                shotTransition.begin(System.currentTimeMillis());
             }
             resetOrbit(client.player);
         }
@@ -1410,7 +1490,37 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             send(new Message.Stop());
             endObservation("观察授权已到期");
         }
+        if (shotTransition.preparing() && !shotTransition.opaque(now)) {
+            player.setVelocity(Vec3d.ZERO);
+            return;
+        }
+        if (idlePoint != null && idlePoint.matches(activeScene)) {
+            if (!targetAvailable(new ShowcaseTarget.Scene(activeScene))) {
+                activeScene = null;
+                stopMotion();
+                status = "挂机点已超出边界、高度或进入排除区，已停止展示";
+                return;
+            }
+            player.setVelocity(Vec3d.ZERO);
+            if (!sceneChunksLoaded(client, idlePoint.position())) {
+                status = "等待挂机点区块加载";
+                return;
+            }
+            player.setPosition(activeScene.x(), activeScene.y(), activeScene.z());
+            if (shotTransition.preparing()) {
+                revealShot(player, idlePoint.yaw(), idlePoint.pitch(), now);
+            } else {
+                player.setYaw(idlePoint.yaw());
+                player.setPitch(idlePoint.pitch());
+            }
+            return;
+        }
         if (retreatUntil > now) {
+            float awayYaw = (float) Math.toDegrees(Math.atan2(retreatDirection.z, retreatDirection.x)) - 90;
+            if (shotTransition.preparing()) {
+                revealShot(player, awayYaw, 0, now);
+                return;
+            }
             Vec3d velocity = retreatDirection.multiply(settings.speed / 20);
             Vec3d nextPosition = player.getEntityPos().add(velocity);
             if (!client.world.getChunkManager().isChunkLoaded(MathHelper.floor(nextPosition.x) >> 4,
@@ -1423,7 +1533,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 return;
             }
             player.setVelocity(velocity);
-            float awayYaw = (float) Math.toDegrees(Math.atan2(retreatDirection.z, retreatDirection.x)) - 90;
             float turnLimit = (float) (settings.turnRateDegreesPerSecond / 20);
             player.setYaw(player.getYaw() + MathHelper.clamp(MathHelper.wrapDegrees(awayYaw - player.getYaw()), -turnLimit, turnLimit));
             player.setPitch(player.getPitch() + MathHelper.clamp(-player.getPitch(), -turnLimit * 2 / 3, turnLimit * 2 / 3));
@@ -1439,7 +1548,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 endObservation("玩家已离开可跟随范围或进入排除区");
                 return;
             }
-            showcaseQueue.markPlayed("player:" + requestedTarget);
+            if (!shotTransition.preparing()) showcaseQueue.markPlayed("player:" + requestedTarget);
             Vec3d center = target.getEntityPos().add(0, 1.2, 0);
             if (previousTargetPosition != null
                     && target.getEntityPos().subtract(previousTargetPosition).horizontalLengthSquared() > 0.0001) {
@@ -1483,6 +1592,13 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             return;
         }
         Vec3d delta = desired.subtract(player.getEntityPos());
+        Vec3d sight = lookAt.subtract(player.getEyePos());
+        float yaw = (float) Math.toDegrees(Math.atan2(sight.z, sight.x)) - 90;
+        float pitch = (float) -Math.toDegrees(Math.atan2(sight.y, Math.sqrt(sight.x * sight.x + sight.z * sight.z)));
+        if (shotTransition.preparing()) {
+            revealShot(player, yaw, pitch, now);
+            return;
+        }
         Vec3d wantedVelocity = delta.multiply(0.12);
         double maxPerTick = settings.speed / 20;
         if (wantedVelocity.lengthSquared() > maxPerTick * maxPerTick) {
@@ -1510,12 +1626,18 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             return;
         }
         player.setVelocity(nextVelocity);
-        Vec3d sight = lookAt.subtract(player.getEyePos());
-        float yaw = (float) Math.toDegrees(Math.atan2(sight.z, sight.x)) - 90;
-        float pitch = (float) -Math.toDegrees(Math.atan2(sight.y, Math.sqrt(sight.x * sight.x + sight.z * sight.z)));
         float turnLimit = (float) (settings.turnRateDegreesPerSecond / 20);
         player.setYaw(player.getYaw() + MathHelper.clamp(MathHelper.wrapDegrees(yaw - player.getYaw()), -turnLimit, turnLimit));
         player.setPitch(player.getPitch() + MathHelper.clamp(pitch - player.getPitch(), -turnLimit * 2 / 3, turnLimit * 2 / 3));
+    }
+
+    private void revealShot(ClientPlayerEntity player, float yaw, float pitch, long now) {
+        player.setVelocity(Vec3d.ZERO);
+        player.setYaw(yaw);
+        player.setPitch(pitch);
+        player.lastYaw = yaw;
+        player.lastPitch = pitch;
+        shotTransition.reveal(now);
     }
 
     public boolean blocksManualMovement() {
@@ -1635,7 +1757,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         } else {
             state.add("camera", JsonNull.INSTANCE);
         }
-        state.addProperty("motionPaused", running && (client.currentScreen != null || client.isPaused()
+        state.addProperty("motionPaused", running && (client.currentScreen != null || client.isPaused() || shotTransition.preparing()
                 || observeState == ObserveState.NOTICE || (sceneArrival != null && sceneArrival.teleport()) || !canOperate(client)
                 || (!automaticPatrolAllowed() && (showcaseQueue.current() == null
                 || showcaseQueue.current().source() == ShowcaseQueue.Source.AUTO))));
@@ -1709,7 +1831,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 if (!worldKey.equals(targetWorld)) {
                     continue;
                 }
-                fields.addProperty("kind", scene.kind().name());
+                fields.addProperty("kind", idlePoint != null && idlePoint.matches(scene) ? "IDLE" : scene.kind().name());
                 fields.addProperty("x", scene.x());
                 fields.addProperty("y", scene.y());
                 fields.addProperty("z", scene.z());
@@ -1791,8 +1913,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         fields.addProperty("entryId", entry.entryId());
         fields.addProperty("targetId", entry.target().id());
         fields.addProperty("name", entry.target().name());
-        fields.addProperty("kind", entry.target() instanceof ShowcaseTarget.Player ? "PLAYER"
-                : ((ShowcaseTarget.Scene) entry.target()).view().kind().name());
+        if (entry.target() instanceof ShowcaseTarget.Scene scene) {
+            fields.addProperty("kind", scene.view().id().equals(IdlePoint.SCENE_ID) ? "IDLE" : scene.view().kind().name());
+        } else {
+            fields.addProperty("kind", "PLAYER");
+        }
         fields.addProperty("source", entry.source().name());
         fields.addProperty("durationSeconds", entry.durationSeconds());
         int remaining = current ? showcaseQueue.remainingSeconds() : entry.durationSeconds();

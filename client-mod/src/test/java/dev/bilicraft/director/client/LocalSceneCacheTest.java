@@ -36,14 +36,16 @@ class LocalSceneCacheTest {
     Path directory;
 
     @Test
-    void versionFourSceneCacheSurvivesWorldPolicyProtocolUpgrade() throws IOException {
+    void versionFourAndFiveSceneCachesSurviveProtocolUpgrade() throws IOException {
         byte[] previous = Codec.encode(new Message.Snapshot(List.of(), List.of(VIEWPOINT)));
-        ByteBuffer.wrap(previous).putShort(4, (short) 4);
-        Files.write(directory.resolve(CACHE_NAME), previous);
+        for (short version : new short[]{4, 5}) {
+            ByteBuffer.wrap(previous).putShort(4, version);
+            Files.write(directory.resolve(CACHE_NAME), previous);
 
-        assertEquals(List.of(VIEWPOINT), new LocalSceneCache(directory).load(SERVER));
-        assertArrayEquals(previous, Files.readAllBytes(directory.resolve(CACHE_NAME)));
-        assertThrows(IOException.class, () -> Codec.decode(previous));
+            assertEquals(List.of(VIEWPOINT), new LocalSceneCache(directory).load(SERVER));
+            assertArrayEquals(previous, Files.readAllBytes(directory.resolve(CACHE_NAME)));
+            assertThrows(IOException.class, () -> Codec.decode(previous));
+        }
 
         Message.PlayerView player = new Message.PlayerView(UUID.randomUUID(), "Player", "world", 0, 100, 0, 0, 0, 1);
         byte[] withPlayer = Codec.encode(new Message.Snapshot(List.of(player), List.of(VIEWPOINT)));

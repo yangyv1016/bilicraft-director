@@ -1,11 +1,11 @@
 # BiliCraft 导播服务（第一阶段）
 
-安装 `bilicraft-director-server-0.1.1.jar` 到 Paper 1.21.11 的 `plugins/`，使用 Java 21。
+安装 `bilicraft-director-server-0.1.2.jar` 到 Paper 1.21.11 的 `plugins/`，使用 Java 21。
 首次运行检查旧配置 `plugins/BiliCraftDirector/config.yml` 的 `world-name`；首次迁移后，以 `worlds.yml` 中的世界 UUID 名单为权威。
 升级时先停服并移除旧版导播 JAR，避免同时加载两份插件。插件内部名为 `BiliCraftDirector`，命令为 `/director`，权限前缀为 `bilicraftdirector`。
 首次升级自动将 `plugins/BiliCraftAI/` 整体移动为 `plugins/BiliCraftDirector/`，包含配置、世界允许名单、地图映射、玩家黑名单与冷却。若新目录已存在且非空，插件停止服务并报告冲突，不覆盖或忽略旧隐私数据；先停服核对合并两份数据，再将旧目录移出 `plugins/`。
 旧 `bilicraftai.*` 权限不会自动授权新节点，请按原有账号/权限组重新授予对应的 `bilicraftdirector.*` 节点，核对显式拒绝和上下文条件。新通道为 `bilicraftdirector:director`，不接受旧通道。
-本轮使用协议 v5，须同时更新客户端与插件，旧版客户端不能继续握手。
+本轮使用协议 v6，须同时更新客户端0.1.3与插件0.1.2，旧版客户端不能继续握手。
 
 通过 LuckPerms 给摄影机账号或摄影机组授予 `bilicraftdirector.data.read`。该权限默认不授予任何人，OP 也不自动获得。
 这是游戏连接中拉取数据、申请观察的调用权限，不是被观察玩家的白名单。普通玩家不需要 Mod 或额外权限。
@@ -156,3 +156,12 @@ worlds:
 
 测试使用纯 Java 会话域及真实文件系统，覆盖通知截止时间、授权重检、伪造和旧 token、并发目标、时长调整所有权/边界/到期、延长持久预留及读写故障。
 真实 Paper 和客户端的联调结果以根项目交付记录为准。
+
+### 服务器挂机点（服务端0.1.2，协议v6）
+
+游戏内执行`/director idle set`保存当前位置和方向，或`/director idle set x y z yaw pitch`指定绝对机位；
+`/director idle info`查看、`/director idle clear`清除所在世界的点位。要求`bilicraftdirector.idle.manage`（默认OP）。
+每个世界共用一个点，按世界UUID原子写入`idle-points.yml`，重启和改名保留。世界不在巡游名单也允许设置与手动展示；
+自动排播仍需世界巡游资格。真实服务端检查高度/边界/排除区，机位不触发区块加载或自动传送。
+保存成功后推送当前世界所有已握手且有数据权限的导播，登录/心跳/切世界补同步。客户端`/directoridle`是上传别名。
+协议v6需双端一起升级；不能与已发布v0.1.2客户端/0.1.1服务端的v5协议混用。

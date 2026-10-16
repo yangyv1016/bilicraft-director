@@ -3,17 +3,17 @@
 纯 Java 21 模块，无 Minecraft、Fabric、Paper 或 JSON 库依赖。通过游戏连接的
 `bilicraftdirector:director` custom payload 传输 `Codec.encode` 产生的原始字节。
 
-每包依次包含 4 字节 magic `0x42434452`（`BCDR`）、2 字节 wire version `5`、1 字节消息类型，
+每包依次包含 4 字节 magic `0x42434452`（`BCDR`）、2 字节 wire version `6`、1 字节消息类型，
 随后为对应消息的固定顺序字段，数值采用大端序。固定字段布局不存在重复命名字段；
 任何额外字段作为尾随数据拒绝，Snapshot 同时禁止重复玩家 UUID 和重复场景 `(world, id)`。
 
 `Hello.version` 和 `HelloReply.version` 是应用握手版本，不是包头的 wire version。
 Codec 接受未知的握手版本，便于服务端返回明确的版本不匹配拒绝；未知 wire version
 则无法安全解释字段，直接拒绝解码。v2 新增场景列表，v3 新增玩家计划时长与时长授权调整，
-v4 新增客户端直连外链所需的地图源元数据，v5 新增独立的世界巡游政策。双端必须一起升级；不接受 v1～v4 网络包头，不把缺失字段当成默认值。本机场景缓存可单独迁移 v4 场景快照，不代表网络兼容。
+v4 新增客户端直连外链所需的地图源元数据，v5 新增独立的世界巡游政策，v6 新增服务端挂机点同步。双端必须一起升级；不接受 v1～v5 网络包头，不把缺失字段当成默认值。本机场景缓存可单独迁移 v4/v5 场景快照，世界规则缓存可迁移v5政策，不代表网络兼容。
 
 消息编号：Hello=0、HelloReply=1、SnapshotRequest=2、Snapshot=3、ObserveRequest=4、
-ObserveUpdate=5、Stop=6、Heartbeat=7、Error=8、DurationRequest=9、DurationReply=10、MapRequest=11、MapSource=12、WorldPolicy=13。
+ObserveUpdate=5、Stop=6、Heartbeat=7、Error=8、DurationRequest=9、DurationReply=10、MapRequest=11、MapSource=12、WorldPolicy=13、IdlePointSync=14。
 ObserveState 顺序为 NOTICE=0、FOLLOWING=1、ENDED=2。
 
 HelloReply 的字段依次是 version（32 位整数）、allowed（布尔）、worldKey（最多 256 UTF-8
@@ -88,3 +88,10 @@ automaticPatrol=false 只暂停自动巡游及自动/AI补点，保留手动选�
 名单外的手动玩家观察仍走完整服务端许可。客户端不能根据一个旧快照直接开始观察。
 SceneView 是服务端提供的展示候选数据，ObserveRequest/ObserveUpdate 的 targetId 仍只表示
 玩家 UUID；观景点与巡游区域不复用玩家观察许可，也不生成玩家预告。
+
+IdlePointSync依次为worldKey（最多256 UTF-8字节、非空白）、是否有机位（布尔）；有机位时追加
+x/y/z（各64位浮点）和yaw/pitch（各32位浮点）。坐标和方向须有限，x/z绝对值≤30000000，
+pitch在−90～90，yaw归一化为[−180,180)。无机位表示清除客户端点位；客户端只接受当前世界。
+服务端在成功握手、心跳、切世界和修改时发送，仅发给有数据权限且握手成功的导播；客户端不能用
+此消息写入服务端。设置和清除通过真实玩家`/director idle`命令，独立校验`bilicraftdirector.idle.manage`。
+服务器以世界UUID持久化，客户端仅内存持有；修改正在播出的机位会停止播出，旧队列姿态不回退为普通环绕。

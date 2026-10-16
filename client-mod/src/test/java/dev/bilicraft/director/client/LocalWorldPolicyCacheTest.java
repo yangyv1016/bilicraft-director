@@ -47,6 +47,20 @@ class LocalWorldPolicyCacheTest {
     }
 
     @Test
+    void localVersionFivePolicyRetainsPatrolAndExclusionsWhileNetworkRejectsIt() throws IOException {
+        LocalWorldPolicyCache cache = new LocalWorldPolicyCache(directory);
+        cache.save(SERVER, POLICY);
+        Path file;
+        try (var paths = Files.list(directory)) { file = paths.findFirst().orElseThrow(); }
+        byte[] old = Codec.encode(POLICY);
+        ByteBuffer.wrap(old).putShort(4, (short) 5);
+        Files.write(file, old);
+        assertEquals(POLICY, cache.load(SERVER, WORLD));
+        assertArrayEquals(old, Files.readAllBytes(file));
+        assertThrows(IOException.class, () -> Codec.decode(old));
+    }
+
+    @Test
     void exactServerAddressPortCaseAndWorldAreIsolated() throws IOException {
         Message.WorldPolicy otherWorld = new Message.WorldPolicy("minecraft:the_nether", new UUID(3, 4), true, List.of());
         Message.WorldPolicy otherServer = new Message.WorldPolicy(WORLD, new UUID(5, 6), true, List.of());

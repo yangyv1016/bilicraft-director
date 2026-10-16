@@ -59,6 +59,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     private static final String DATA_PERMISSION = "bilicraftdirector.data.read";
     private static final String BLACKLIST_PERMISSION = "bilicraftdirector.blacklist.manage";
     private static final String WORLDS_PERMISSION = "bilicraftdirector.worlds.manage";
+    private static final String IDLE_PERMISSION = "bilicraftdirector.idle.manage";
     private static final String MAP_PERMISSION = "bilicraftdirector.map.manage";
     private static final long NORMAL_COOLDOWN_MILLIS = 30 * 60_000L;
     private static final long REJECT_COOLDOWN_MILLIS = 24 * 60 * 60_000L;
@@ -72,6 +73,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     private WorldCatalog worlds;
     private PrivacyStore privacy;
     private MapSources mapSources;
+    private IdlePoints idlePoints;
     private boolean storageUnavailable;
 
     @Override
@@ -116,6 +118,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             }
             privacy = new PrivacyStore(getDataFolder().toPath().resolve("privacy.properties"));
             mapSources = new MapSources(getDataFolder().toPath().resolve("map-sources.yml"));
+            idlePoints = new IdlePoints(getDataFolder().toPath().resolve("idle-points.yml"));
         } catch (IOException | InvalidConfigurationException | IllegalArgumentException exception) {
             getLogger().log(Level.SEVERE, "BiliCraft 导播配置或隐私数据读取失败，停止服务，保留原文件供修复。", exception);
             Bukkit.getPluginManager().disablePlugin(this);
@@ -133,8 +136,13 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                     options.add("worlds");
                 }
                 if (sender.hasPermission(MAP_PERMISSION)) options.add("map");
+                if (sender.hasPermission(IDLE_PERMISSION)) options.add("idle");
                 return options.stream()
                         .filter(value -> value.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+            }
+            if (args[0].equalsIgnoreCase("idle") && sender.hasPermission(IDLE_PERMISSION) && args.length == 2) {
+                return List.of("set", "clear", "info").stream()
+                        .filter(value -> value.startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
             }
             if (args[0].equalsIgnoreCase("map") && sender.hasPermission(MAP_PERMISSION)) {
                 if (args.length == 2) return List.of("set", "clear", "status").stream()
@@ -549,6 +557,8 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 new Message.RegionBounds(bounds.minX(), bounds.minZ(), bounds.maxX(), bounds.maxZ())).toList();
         send(camera, new Message.WorldPolicy(world.getKey().toString(), world.getUID(),
                 profile != null && profile.automaticPatrol(), exclusions));
+        Message.IdlePose point = idlePoints.get(world.getUID());
+        send(camera, new Message.IdlePointSync(world.getKey().toString(), point != null && idlePointAllowed(world, point) ? point : null));
     }
 
     private void pushWorldPolicy(UUID worldId) {
@@ -651,6 +661,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             return onWorldCommand(sender, args);
         }
         if (action.equals("map")) return onMapCommand(sender, args);
+        if (action.equals("idle")) return onIdleCommand(sender, args);
         if (action.equals("blacklist") && args.length >= 2
                 && (args[1].equalsIgnoreCase("add") || args[1].equalsIgnoreCase("remove"))) {
             if (!sender.hasPermission(BLACKLIST_PERMISSION)) {
@@ -759,8 +770,69 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
         if (player.hasPermission(WORLDS_PERMISSION)) {
             usage += " | worlds list/add/remove <实际世界名>";
         }
+        if (player.hasPermission(IDLE_PERMISSION)) usage += " | idle set/clear/info";
         if (player.hasPermission(MAP_PERMISSION)) usage += " | map set/clear/status <实际世界名>";
         player.sendMessage(Component.text(usage, NamedTextColor.YELLOW));
+        return true;
+    }
+
+    private boolean onIdleCommand(CommandSender sender, String[] args) {
+        if (!sender.hasPermission(IDLE_PERMISSION)) {
+            sender.sendMessage(Component.text("需要 " + IDLE_PERMISSION + " 权限才能管理服务器挂机点。", NamedTextColor.RED));
+            return true;
+        }
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("请在游戏内使用 /director idle，按所在世界保存挂机点。");
+            return true;
+        }
+        if (storageUnavailable) {
+            sender.sendMessage(Component.text("服务端存储故障，请修复后重启；挂机点未更改。", NamedTextColor.RED));
+            return true;
+        }
+        String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+        World world = player.getWorld();
+        if (action.equals("info") && args.length == 2) {
+            Message.IdlePose point = idlePoints.get(world.getUID());
+            sender.sendMessage(Component.text(point == null ? "当前世界尚未设置服务器挂机点。"
+                    : "服务器挂机点：" + point.x() + " " + point.y() + " " + point.z()
+                    + "，yaw=" + point.yaw() + "，pitch=" + point.pitch(), NamedTextColor.AQUA));
+            return true;
+        }
+        boolean setting = action.equals("set");
+        if (!(setting && (args.length == 2 || args.length == 7)) && !(action.equals("clear") && args.length == 2)) {
+            sender.sendMessage(Component.text("用法：/director idle set [x y z yaw pitch] | clear | info（当前世界）", NamedTextColor.YELLOW));
+            return true;
+        }
+        Message.IdlePose point = null;
+        try {
+            if (setting) {
+                Location location = player.getLocation();
+                point = args.length == 2 ? new Message.IdlePose(location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch())
+                        : new Message.IdlePose(Double.parseDouble(args[2]), Double.parseDouble(args[3]), Double.parseDouble(args[4]),
+                                Float.parseFloat(args[5]), Float.parseFloat(args[6]));
+                if (!idlePointAllowed(world, point)) throw new IllegalArgumentException("机位超出世界高度、边界或位于排除区");
+            }
+            idlePoints.set(world.getUID(), point);
+        } catch (IllegalArgumentException exception) {
+            sender.sendMessage(Component.text("挂机点无效：" + exception.getMessage(), NamedTextColor.RED));
+            return true;
+        } catch (IOException exception) {
+            failStorage("挂机点", exception);
+            sender.sendMessage(Component.text("挂机点保存失败，原设置保留，请检查服务端日志。", NamedTextColor.RED));
+            return true;
+        }
+        pushWorldPolicy(world.getUID());
+        sender.sendMessage(Component.text(setting ? "已保存服务器挂机点，并同步当前世界的授权导播。" : "已清除服务器挂机点，并同步授权导播。", NamedTextColor.GREEN));
+        return true;
+    }
+
+    private boolean idlePointAllowed(World world, Message.IdlePose point) {
+        if (point.y() < world.getMinHeight() || point.y() >= world.getMaxHeight()
+                || !world.getWorldBorder().isInside(new Location(world, point.x(), point.y(), point.z()))) return false;
+        for (SceneConfiguration.Bounds bounds : worldContexts.get(world.getUID()).exclusions()) {
+            if (point.x() >= bounds.minX() && point.x() <= bounds.maxX()
+                    && point.z() >= bounds.minZ() && point.z() <= bounds.maxZ()) return false;
+        }
         return true;
     }
 

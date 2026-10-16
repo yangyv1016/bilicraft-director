@@ -4,6 +4,20 @@ import java.util.List;
 import java.util.UUID;
 
 public sealed interface Message {
+    record IdlePointSync(String worldKey, IdlePose point) implements Message {
+    }
+
+    record IdlePose(double x, double y, double z, float yaw, float pitch) {
+        public IdlePose {
+            if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)
+                    || Math.abs(x) > 30_000_000 || Math.abs(z) > 30_000_000
+                    || !Float.isFinite(yaw) || !Float.isFinite(pitch) || pitch < -90 || pitch > 90) {
+                throw new IllegalArgumentException("挂机点坐标或方向无效，pitch须在-90～90之间");
+            }
+            yaw = ((yaw % 360) + 540) % 360 - 180;
+        }
+    }
+
     record Hello(int version) implements Message {
     }
 

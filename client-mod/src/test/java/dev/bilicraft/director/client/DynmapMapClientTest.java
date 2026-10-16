@@ -282,6 +282,81 @@ class DynmapMapClientTest {
     }
 
     @Test
+    void bilicraftHtmlWrappersImportOnlyTheVisibleTitleWithoutCssOrOwnerTooltips() throws Exception {
+        body.set("""
+                {"sets":{"markers":{"markers":{"view":{"x":1,"y":70,"z":2,
+                "label":"<div class=\\"main\\"><div>&1世界树</div><style>.toptip{display:none;}</style><div class=\\"toptip\\"><div>创建时间：2026-10-16</div><div>玩家：fixture-owner</div></div></div>"},
+                "plain":{"x":500,"y":70,"z":2,"label":"<style>.hidden{color:red;}</style><b>公会大厅</b>"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals("世界树", result.scenes().getFirst().name());
+        assertEquals("公会大厅", result.scenes().getLast().name());
+    }
+
+    @Test
+    void pluginIdentifiersAreBlockedWithoutHidingEnglishPlaceNamesOrEntireLayers() throws Exception {
+        body.set("""
+                {"sets":{
+                "residence.markerset":{"areas":{
+                "internal":{"x":[0,10,10,0],"z":[0,0,10,10],"ytop":80,"ybottom":60,"label":"newhoroburgh.market_g7"},
+                "internal2":{"x":[10,20,20,10],"z":[0,0,10,10],"ytop":80,"ybottom":60,"label":"newhoroburgh.NH5-D22-W4"},
+                "normal":{"x":[500,510,510,500],"z":[0,0,10,10],"ytop":80,"ybottom":60,"label":"Elysian_Realm"}}},
+                "factions_markerset":{"areas":{"town":{"x":[900,910,910,900],"z":[0,0,10,10],"ytop":80,"ybottom":60,"label":"Noah"}}},
+                "stargate":{"markers":{"portal":{"x":1200,"y":70,"z":0,"label":"World Tree"}}},
+                "markers":{"markers":{"station":{"x":1500,"y":70,"z":0,"label":"[DRT]云轨冬泉谷站"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(java.util.Set.of("Elysian_Realm", "Noah", "World Tree", "[DRT]云轨冬泉谷站"),
+                new java.util.HashSet<>(result.scenes().stream().map(Message.SceneView::name).toList()));
+        assertEquals(4, result.regions().size(), "candidate filtering must not remove source geometry");
+        assertNotNull(DynmapRegion.locate(result.regions(), WORLD, 5, 5));
+        assertTrue(result.note().contains("屏蔽 2"));
+    }
+
+    @Test
+    void railwayPolicyRejectsOnlyExplicitTechnicalNamesAndLegacyCssFragments() {
+        for (String blocked : java.util.List.of("西线 K12+345", "K0+001", "国铁里程标12", "线路节点_4",
+                "轨道节点", "铁路控制点-20", "信号机#3", "道岔12", "rail_node_19", "track:42", "signal_3",
+                "newhoroburgh.market_g7", "newhoroburgh.apartment1.qmswyx",
+                "冰克洛-瓦尔德分部 .toptip{display:none;}.main{display:in")) {
+            assertFalse(DynmapMapClient.eligibleName(blocked), blocked);
+        }
+        for (String kept : java.util.List.of("[国铁]泽地站", "[私铁][SF2]金色平原站", "[DRT]暖风河谷",
+                "湖光冰道霜湖谷站", "千霄草线 西州湾站", "新赫洛堡火车总站", "铁路博物馆", "信号机展览馆",
+                "Noah", "HESCO超市", "Elysian_Realm", "The_Spirit_Tree", "Modern Art Museum", "St. Paul's Cathedral",
+                "冰克洛-瓦尔德分部")) {
+            assertTrue(DynmapMapClient.eligibleName(kept), kept);
+        }
+    }
+
+    @Test
+    void railwayTechnicalCandidatesAreFilteredButStationsRemain() throws Exception {
+        body.set("""
+                {"sets":{"markers":{"markers":{
+                "signal":{"x":1,"y":70,"z":2,"label":"信号机#3"},
+                "mileage":{"x":500,"y":70,"z":2,"label":"西线 K12+345"},
+                "station":{"x":1000,"y":70,"z":2,"label":"[国铁]泽地站"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(1, result.scenes().size());
+        assertEquals("[国铁]泽地站", result.scenes().getFirst().name());
+        assertTrue(result.note().contains("屏蔽 2"));
+    }
+
+    @Test
+    void generatedWorldBorderIsNotASceneButACustomLandmarkWithThatNameIsKept() throws Exception {
+        body.set("""
+                {"sets":{"markers":{"markers":{"landmark":{"x":5,"y":70,"z":5,"label":"世界边界"}},"areas":{
+                "_worldborder_Paralon":{"x":[0,1000,1000,0],"z":[0,0,1000,1000],"ytop":80,"ybottom":60,"label":"世界边界"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(1, result.scenes().size());
+        assertEquals(Message.SceneKind.VIEWPOINT, result.scenes().getFirst().kind());
+        assertEquals(1, result.regions().size());
+        assertTrue(result.note().contains("屏蔽 1"));
+    }
+
+    @Test
     void malformedAndDegenerateAreasAreSkippedWithoutPoisoningValidPointMarkers() throws Exception {
         body.set("""
                 {"sets":{"s":{"markers":{"point":{"x":1,"y":70,"z":2,"label":"保留景点"}},"areas":{

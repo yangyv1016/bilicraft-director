@@ -39,6 +39,7 @@ public sealed interface ShowcaseTarget permits ShowcaseTarget.Player, ShowcaseTa
 
         @Override
         public String label() {
+            if (view.id().equals(IdlePoint.SCENE_ID)) return "[挂机点] " + view.name();
             return switch (view.kind()) {
                 case VIEWPOINT -> "[观景点] " + view.name();
                 case AREA -> "[巡游区域] " + view.name();

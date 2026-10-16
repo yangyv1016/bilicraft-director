@@ -37,11 +37,21 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Direct external-map download only. No Minecraft state or game-server traffic is involved. */
 public final class DynmapMapClient implements AutoCloseable {
     private static final int MAX_BYTES = 2 * 1_024 * 1_024;
     private static final int MAX_SCENES = 4_096;
+    private static final Pattern BILICRAFT_LABEL_TITLE = Pattern.compile(
+            "(?is)^\\s*<div\\s+class=[\"']main[\"']\\s*>\\s*<div>(.*?)</div>");
+    private static final Pattern INTERNAL_IDENTIFIER = Pattern.compile("[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)+");
+    private static final Pattern RAILWAY_TECHNICAL_NAME = Pattern.compile(
+            "(?i)(?:^|\\s)K\\d+\\+\\d+(?:$|\\s)"
+                    + "|(?:里程标|公里标|线路节点|轨道节点|线路控制点|铁路控制点|铁路路标|信号机|道岔)(?:[\\s#:_-]*[A-Za-z0-9+._-]+)?$"
+                    + "|^(?:rail(?:way)?|track|signal|switch|route|line)[_:-][A-Za-z0-9_.:+-]+$");
+    private static final Pattern LABEL_CODE_FRAGMENT = Pattern.compile("(?i)\\.toptip\\s*\\{|\\.main\\s*\\{\\s*display\\s*:");
     private final ExecutorService executor = Executors.newFixedThreadPool(2,
             Thread.ofPlatform().daemon().name("bilicraft-dynmap-", 0).factory());
     private final HttpClient client;
@@ -153,6 +163,7 @@ public final class DynmapMapClient implements AutoCloseable {
             ArrayList<DynmapRegion> regions = new ArrayList<>();
             int examined = 0;
             int skipped = 0;
+            int filtered = 0;
             String prefix = scenePrefix(source.baseUrl(), source.dynmapWorld(), source.worldKey());
             for (Map.Entry<String, JsonElement> set : sets.entrySet()) {
                 JsonObject contents = set.getValue().getAsJsonObject();
@@ -194,17 +205,28 @@ public final class DynmapMapClient implements AutoCloseable {
                             if (label == null || !label.isJsonPrimitive() || !label.getAsJsonPrimitive().isString()) {
                                 throw new IllegalArgumentException("Invalid label");
                             }
-                            String name = label.getAsString().replaceAll("(?is)<[^>]*>", " ")
+                            String name = label.getAsString();
+                            // BiliCraft embeds CSS and creation/owner tooltips after the visible title.
+                            Matcher title = BILICRAFT_LABEL_TITLE.matcher(name);
+                            if (title.find()) name = title.group(1);
+                            name = name.replaceAll("(?is)<(style|script)\\b[^>]*>.*?</\\1\\s*>", " ")
+                                    .replaceAll("(?is)<[^>]*>", " ")
                                     .replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<")
                                     .replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
                                     .replaceAll("(?is)<[^>]*>", " ")
                                     .replaceAll("§.|(?i:&[0-9a-fk-or])", "")
                                     .replaceAll("[\\p{Cc}\\p{Cf}]", " ").replaceAll("\\s+", " ").strip();
                             if (name.isEmpty()) throw new IllegalArgumentException("Empty label");
+                            boolean blocked = !eligibleName(name) || (section.equals("areas")
+                                    && marker.getKey().equals("_worldborder_" + source.dynmapWorld()));
                             if (name.codePointCount(0, name.length()) > 48) name = name.substring(0, name.offsetByCodePoints(0, 48));
                             if (!StandardCharsets.UTF_8.newEncoder().canEncode(name)) throw new IllegalArgumentException("Invalid label encoding");
                             String id = prefix + digest(set.getKey() + "\n" + section + "\n" + marker.getKey()).substring(0, 24);
                             if (vertices != null) regions.add(new DynmapRegion(id, name, source.worldKey(), vertices));
+                            if (blocked) {
+                                filtered++;
+                                continue;
+                            }
                             scenes.add(new Message.SceneView(id, name, kind, source.worldKey(), x, y, z, radius));
                         } catch (IllegalArgumentException | IllegalStateException | NullPointerException exception) {
                             skipped++;
@@ -227,11 +249,18 @@ public final class DynmapMapClient implements AutoCloseable {
             int duplicates = scenes.size() - keptIds.size();
             scenes.removeIf(scene -> !keptIds.contains(scene.id()));
             return new Result(scenes, regions, fetchedAt, "外链导入 " + scenes.size() + " 个候选"
+                    + (filtered == 0 ? "" : "，屏蔽 " + filtered + " 个内部/技术标记")
                     + (duplicates == 0 ? "" : "，合并 " + duplicates + " 个同名近距重复标记（128格内）")
                     + (skipped == 0 ? "" : "，跳过 " + skipped + " 个无效标记"));
         } catch (RuntimeException | StackOverflowError exception) {
             throw new IOException("地图JSON格式无效；保留已有缓存");
         }
+    }
+
+    /** The same name policy applies before truncation and to old map-only disk-cache entries. */
+    static boolean eligibleName(String name) {
+        return !INTERNAL_IDENTIFIER.matcher(name).matches() && !RAILWAY_TECHNICAL_NAME.matcher(name).find()
+                && !LABEL_CODE_FRAGMENT.matcher(name).find();
     }
 
     private static double number(JsonElement value) {

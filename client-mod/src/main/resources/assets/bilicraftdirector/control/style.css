@@ -571,6 +571,11 @@ input::placeholder  {
     border:1.5px solid var(--accent);
     border-radius:2px
 }
+.kind-dot.idle  {
+    background:var(--blue);
+    border:1px solid var(--gold);
+    border-radius:2px
+}
 .map-workspace  {
     min-width:0;
     min-height:0;

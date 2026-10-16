@@ -1,7 +1,7 @@
 "use strict";
 
 const element = (id) => document.getElementById(id);
-const kindNames = { PLAYER: "玩家", VIEWPOINT: "观景点", AREA: "巡游区域" };
+const kindNames = { PLAYER: "玩家", VIEWPOINT: "观景点", AREA: "巡游区域", IDLE: "挂机点" };
 const providerNames = { DEEPSEEK: "DeepSeek", OPENAI: "OpenAI" };
 const cameraModeNames = { AUTO: "自动", FOLLOW: "跟拍", ORBIT: "环绕", DOLLY: "推进 / 拉远", TRUCK: "横移", CRANE: "升降", PAN: "摇镜", STATIC: "固定机位" };
 const cameraModeHelp = {
@@ -147,8 +147,9 @@ function updateAvailability() {
         button.disabled = !available || busy || state?.durationAdjustmentPending || !entry || duration < minimum || duration > maximum;
     });
     element("saveCamera").disabled = !available || busy || cameraSavePending || !cameraDirty;
-    element("liveCameraMode").disabled = !available || cameraSavePending;
-    for (const setting of cameraNumberSettings) element("live" + liveCameraIds[setting]).disabled = !available || cameraSavePending;
+    const idlePlaying = state?.running && state.queue.current?.kind === "IDLE";
+    element("liveCameraMode").disabled = !available || cameraSavePending || idlePlaying;
+    for (const setting of cameraNumberSettings) element("live" + liveCameraIds[setting]).disabled = !available || cameraSavePending || idlePlaying;
     const amplitudeUsed = ["AUTO", "DOLLY", "TRUCK", "CRANE", "PAN"].includes(element("liveCameraMode").value);
     element("liveMotionAmplitude").disabled ||= !amplitudeUsed;
     element("liveMotionAmplitude").title = amplitudeUsed ? "运动范围受镜头距离和世界边界约束" : "当前模式不使用运动幅度；已保留给其它模式";
@@ -347,7 +348,8 @@ function applyState(next) {
         element("liveCameraMode").value = next.settings.mode;
         for (const setting of cameraNumberSettings) element("live" + liveCameraIds[setting]).value = next.settings[setting];
         renderLiveCameraValues();
-        element("liveCameraStatus").textContent = next.cameraSettingsSaved ? "已应用 · 已保存" : "已实时应用 · 未保存";
+        element("liveCameraStatus").textContent = next.running && next.queue.current?.kind === "IDLE" ? "挂机点 · 位置与注视方向锁定"
+            : next.cameraSettingsSaved ? "已应用 · 已保存" : "已实时应用 · 未保存";
     }
     if (!queueSettingsDirty && !element("queueSettingsForm").contains(document.activeElement)) loadQueueSettings();
     if (!entryDurationDirty && document.activeElement !== element("entryDuration")) {
@@ -714,11 +716,12 @@ function renderSelection() {
     element("selectionDescription").textContent = target ? target.label : "从素材库或位置图选择，再加入队列。";
     element("selectionWorld").textContent = target ? target.world : "—";
     element("selectionCoordinates").textContent = target ? [target.x, target.y, target.z].map((n) => n.toFixed(1)).join(" / ") : "—";
-    element("selectionRadius").textContent = target && target.kind !== "PLAYER" ? target.radius + " 格" : "—";
+    element("selectionRadius").textContent = target && !["PLAYER", "IDLE"].includes(target.kind) ? target.radius + " 格" : "—";
     element("selectionStatus").textContent = !target ? "玩家目标始终经过 15 秒私密预告。"
         : !state.targets.some((candidate) => candidate.id === target.id) ? "此目标已不在当前候选中，请重新拉取。"
             : !target.available ? "当前目标不可展示；请检查当前世界、边界、排除区或玩家授权。"
                 : target.kind === "PLAYER" ? "发起后先私密预告 15 秒；玩家可拒绝或加入长期黑名单。"
+                    : target.kind === "IDLE" ? "传送到保存的机位与注视方向后完全静止，按场景时长结束；需本人 tp 权限，继续遵守巡游、边界与排除区规则。"
                     : (target.automaticAvailable ? "" : "仅手动选择，不参与自动或AI补点。")
                         + "远处或未加载场景由本账号发起传送，到位并加载后开始运镜。";
     element("entryDurationUnit").textContent = "秒";
@@ -1277,11 +1280,12 @@ function drawMap() {
     for (const target of targets) {
         const x = (target.x - left) * mapView.scale;
         const z = (target.z - top) * mapView.scale;
-        const radius = target.kind === "PLAYER" ? 0 : target.radius * mapView.scale;
+        const radius = ["PLAYER", "IDLE"].includes(target.kind) ? 0 : target.radius * mapView.scale;
         if (x + radius < -30 || z + radius < -30 || x - radius > mapWidth + 30 || z - radius > mapHeight + 30) continue;
         const selected = target.id === selectedId;
         const current = target.id === state.selectedTargetId;
-        const color = target.kind === "PLAYER" ? "#94c1e7" : target.kind === "VIEWPOINT" ? "#d6bf8f" : "#bddb92";
+        const color = target.kind === "PLAYER" ? "#94c1e7" : target.kind === "IDLE" ? "#8ecbd0"
+            : target.kind === "VIEWPOINT" ? "#d6bf8f" : "#bddb92";
         context.globalAlpha = target.available ? 1 : 0.4;
         if (radius > 0) {
             context.fillStyle = target.kind === "VIEWPOINT" ? "#d6bf8f09" : "#bddb920d";
@@ -1342,7 +1346,7 @@ function drawMap() {
 }
 
 function fitMap() {
-    const points = visibleTargets().map((target) => ({ x: target.x, z: target.z, radius: target.kind === "PLAYER" ? 0 : target.radius }));
+    const points = visibleTargets().map((target) => ({ x: target.x, z: target.z, radius: ["PLAYER", "IDLE"].includes(target.kind) ? 0 : target.radius }));
     if (state?.camera) points.push({ x: state.camera.x, z: state.camera.z, radius: 0 });
     if (!points.length) return;
     const minX = Math.min(...points.map((point) => point.x - point.radius));

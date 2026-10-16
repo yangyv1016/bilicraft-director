@@ -6,6 +6,7 @@ import dev.bilicraft.director.protocol.Protocol;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -29,6 +30,11 @@ public final class LocalWorldPolicyCache {
             bytes = input.readNBytes(Protocol.MAX_PACKET_BYTES + 1);
         } catch (NoSuchFileException exception) {
             return null;
+        }
+        // Only the unchanged local v5 policy layout is migrated; network v5 remains rejected.
+        if (bytes.length >= 7 && ByteBuffer.wrap(bytes).getInt() == Protocol.MAGIC
+                && ByteBuffer.wrap(bytes).getShort(4) == 5 && bytes[6] == 13) {
+            ByteBuffer.wrap(bytes).putShort(4, (short) Protocol.VERSION);
         }
         Message message = Codec.decode(bytes);
         if (!(message instanceof Message.WorldPolicy policy) || !policy.worldKey().equals(worldKey)) {

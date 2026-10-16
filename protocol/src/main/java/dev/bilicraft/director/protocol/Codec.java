@@ -33,6 +33,20 @@ public final class Codec {
         output.writeInt(Protocol.MAGIC);
         output.writeShort(Protocol.VERSION);
         switch (message) {
+            case Message.IdlePointSync sync -> {
+                output.writeByte(14);
+                if (sync.worldKey() == null || sync.worldKey().isBlank()) throw new IOException("Idle world is required");
+                writeString(output, sync.worldKey(), MAX_WORLD_BYTES);
+                output.writeBoolean(sync.point() != null);
+                if (sync.point() != null) {
+                    Message.IdlePose point = sync.point();
+                    output.writeDouble(point.x());
+                    output.writeDouble(point.y());
+                    output.writeDouble(point.z());
+                    output.writeFloat(point.yaw());
+                    output.writeFloat(point.pitch());
+                }
+            }
             case Message.Hello hello -> {
                 output.writeByte(0);
                 output.writeInt(hello.version());
@@ -332,6 +346,19 @@ public final class Codec {
                 Message.WorldPolicy policy = new Message.WorldPolicy(worldKey, worldId, automaticPatrol, regions);
                 validateWorldPolicy(policy);
                 yield policy;
+            }
+            case 14 -> {
+                String world = readString(input, MAX_WORLD_BYTES);
+                if (world.isBlank()) throw new IOException("Idle world is required");
+                Message.IdlePose point = null;
+                if (readBoolean(input)) {
+                    try {
+                        point = new Message.IdlePose(input.readDouble(), input.readDouble(), input.readDouble(), input.readFloat(), input.readFloat());
+                    } catch (IllegalArgumentException exception) {
+                        throw new IOException("Invalid idle pose", exception);
+                    }
+                }
+                yield new Message.IdlePointSync(world, point);
             }
             default -> throw new IOException("Unknown message type");
         };
