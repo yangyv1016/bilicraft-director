@@ -31,6 +31,7 @@ import net.minecraft.client.gui.screen.DisconnectedScreen;
 import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.gui.screen.multiplayer.ConnectScreen;
+import net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.network.ServerInfo;
@@ -122,9 +123,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private long lastQueueRefreshAttempt;
     private boolean running;
     private boolean allowed;
-    private boolean resumeAfterReconnect;
+    private final ConnectionSession connectionSession = new ConnectionSession();
     private ServerInfo lastServer;
-    private long nextReconnect;
+    private Message.MapSource deferredMapSource;
+    private Runnable pendingMapCompletion;
     private long lastMessage;
     private long lastHeartbeat;
     private String currentWorldKey;
@@ -186,11 +188,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     client.getNetworkHandler().sendChatCommand("director idle info");
                     return 1;
                 }))));
-        LocalMapSettings.Profile defaultMap = LocalMapSettings.BILICRAFT_DEFAULT;
-        mapClient.fetch(defaultMap.baseUrl(), defaultMap.dynmapWorld(), "minecraft:overworld")
-                .whenComplete((result, error) -> {
-                    if (error != null) LOGGER.warn("Default map prefetch failed; connection bootstrap or manual refresh can retry");
-                });
         settings.load(LOGGER);
         aiSettings.load();
         try {
@@ -228,6 +225,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (!overlay) localChat.append(message.getString(), System.currentTimeMillis());
         });
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            connectionSession.joined();
             localChat.clear();
             clearMapState();
             invalidateAiDecision();
@@ -272,13 +270,15 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     && !scene.id().startsWith("dynmap:")).toList();
             refreshMapTargets(client);
         });
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> client.execute(() -> {
+            if (client.getNetworkHandler() != null && client.getNetworkHandler() != handler) return;
+            connectionSession.disconnected(running, System.currentTimeMillis());
+            if (connectionSession.reconnectPending()) LOGGER.info("Director reconnect armed; waiting for disconnection screen");
             shotTransition.clear();
             idlePoint = null;
             localChat.clear();
             clearMapState();
             invalidateAiDecision();
-            resumeAfterReconnect = running || resumeAfterReconnect;
             running = false;
             allowed = false;
             requestedTarget = null;
@@ -297,9 +297,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             businessRequestCancelled = false;
             currentWorldKey = null;
             targetSwitchDirection = 0;
-            nextReconnect = System.currentTimeMillis() + 10_000;
-            status = resumeAfterReconnect ? "连接中断，等待重连" : "未连接";
-        });
+            status = connectionSession.reconnectPending() ? "连接中断，等待重连" : "未连接";
+        }));
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
             invalidateAiDecision();
@@ -329,16 +328,30 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
 
     private void tick(MinecraftClient client) {
         synchronizeWorld(client);
-        if (client.world != null && client.player != null) {
-            if (mapBootstrapPending && client.getNetworkHandler() != null && client.currentScreen == null
-                    && client.getOverlay() == null) {
+        long now = System.currentTimeMillis();
+        var networkHandler = client.getNetworkHandler();
+        boolean packsPending = networkHandler != null && ((ResourcePackTracker.Access) networkHandler.getConnection())
+                .bilicraftDirector$resourcePackTracker().pending();
+        connectionSession.updateReady(now, client.world != null && client.player != null && networkHandler != null
+                && networkHandler.isConnectionOpen() && client.currentScreen == null && client.getOverlay() == null, packsPending);
+        if (connectionSession.ready()) {
+            if (pendingMapCompletion != null) {
+                Runnable completion = pendingMapCompletion;
+                pendingMapCompletion = null;
+                completion.run();
+            }
+            if (deferredMapSource != null) {
+                Message.MapSource source = deferredMapSource;
+                deferredMapSource = null;
+                pullMapExternal(client, source);
+            } else if (mapBootstrapPending && !mapLoading) {
                 mapBootstrapPending = false;
                 pullMapExternal(client, mapSource);
             }
         }
         synchronizeAiSettings();
         while (toggleKey.wasPressed()) {
-            if (running || resumeAfterReconnect) {
+            if (running || connectionSession.reconnectPending()) {
                 stop("已手动停止");
             } else {
                 start();
@@ -367,8 +380,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 switchTarget(-1);
             }
         }
-        long now = System.currentTimeMillis();
-        if (mapLoading && now >= mapRequestDeadline) {
+        if (mapLoading && pendingMapCompletion == null && now >= mapRequestDeadline) {
             mapGeneration++;
             mapLoading = false;
             mapMetadataPending = false;
@@ -377,23 +389,27 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             mapDetail = "地图外链请求超时，保留已有本机观景缓存";
         }
         if (client.getNetworkHandler() == null) {
-            if (resumeAfterReconnect && lastServer != null && now >= nextReconnect
-                    && client.currentScreen instanceof DisconnectedScreen) {
-                nextReconnect = now + 30_000;
-                ConnectScreen.connect(new TitleScreen(), client, ServerAddress.parse(lastServer.address),
-                        lastServer, false, null);
-            } else if (resumeAfterReconnect && client.currentScreen != null
-                    && !(client.currentScreen instanceof DisconnectedScreen)
-                    && !(client.currentScreen instanceof ConnectScreen)) {
-                resumeAfterReconnect = false;
+            ConnectionSession.OfflineScreen screen = client.currentScreen instanceof DisconnectedScreen
+                    ? ConnectionSession.OfflineScreen.DISCONNECTED : client.currentScreen instanceof ConnectScreen
+                    ? ConnectionSession.OfflineScreen.CONNECTING : client.currentScreen instanceof TitleScreen
+                    || client.currentScreen instanceof MultiplayerScreen ? ConnectionSession.OfflineScreen.EXIT
+                    : ConnectionSession.OfflineScreen.TRANSITION;
+            boolean wasPending = connectionSession.reconnectPending();
+            if (lastServer != null && connectionSession.takeReconnectAttempt(now, screen)) {
+                status = "正在自动重连原服务器";
+                LOGGER.info("Director reconnect attempt started");
+                ConnectScreen.connect(new TitleScreen(), client, ServerAddress.parse(lastServer.address), lastServer, false, null);
+            } else if (wasPending && !connectionSession.reconnectPending()) {
                 status = "已退出重连";
+                LOGGER.info("Director reconnect cancelled after leaving connection screens");
             }
             return;
         }
-        if (resumeAfterReconnect && canOperate(client)) {
+        if (connectionSession.shouldResume() && canOperate(client)) {
+            LOGGER.info("New game join and resource loading ready; resuming director");
             start();
         }
-        if (now - lastHeartbeat >= 2_000 && ClientPlayNetworking.canSend(DirectorPayload.ID)) {
+        if (connectionSession.setupReady() && now - lastHeartbeat >= 2_000 && ClientPlayNetworking.canSend(DirectorPayload.ID)) {
             if (!worldPolicyReceived && lastHeartbeat == 0) {
                 worldPolicyPending = true;
                 worldPolicyDeadline = now + 8_000;
@@ -530,6 +546,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             mapDetail = source.detail();
             if (!source.configured() || changed) {
                 mapGeneration++;
+                deferredMapSource = null;
+                pendingMapCompletion = null;
                 importedScenes = List.of();
                 mapRegions = List.of();
                 mapLoaded = false;
@@ -654,6 +672,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         importedScenes = List.of();
         mapRegions = List.of();
         mapBootstrapPending = false;
+        deferredMapSource = null;
+        pendingMapCompletion = null;
         mapLoaded = false;
         mapMetadataPending = false;
         mapRefreshRequested = false;
@@ -702,7 +722,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                         lastServer == null ? "singleplayer" : lastServer.address, currentWorldKey));
                 mapSource = new Message.MapSource(0, currentWorldKey, true, localMapProfile.baseUrl(),
                         localMapProfile.dynmapWorld(), List.of(), mapBootstrapPending
-                        ? "BiliCraft 默认地图已就绪，进入世界后自动拉取一次" : "本机地图配置已载入；点击拉取后才连接外链");
+                        ? "BiliCraft 默认地图已配置，资源包与世界就绪后自动拉取一次" : "本机地图配置已载入；点击拉取后才连接外链");
                 mapDetail = mapSource.detail();
             }
         } catch (IOException | IllegalArgumentException exception) {
@@ -772,6 +792,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void pullMapExternal(MinecraftClient client, Message.MapSource source) {
+        mapBootstrapPending = false;
+        if (!connectionSession.ready()) {
+            deferredMapSource = source;
+            mapDetail = "等待资源包与世界加载完成后再拉取地图";
+            return;
+        }
         long generation = ++mapGeneration;
         String serverAddress = lastServer == null ? "singleplayer" : lastServer.address;
         mapLoading = true;
@@ -779,28 +805,32 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         mapRequestDeadline = System.currentTimeMillis() + 30_000;
         mapDetail = "本机正在直连 Dynmap 外链；数据不经过 Minecraft 服务器";
         mapClient.fetch(source.baseUrl(), source.dynmapWorld(), source.worldKey()).whenComplete((result, error) -> client.execute(() -> {
-            synchronizeWorld(client);
-            if (allowed && System.currentTimeMillis() - lastMessage > 8_000) {
-                revokeServerAccess("导播服务响应超时");
-            }
-            if (generation != mapGeneration
-                    || !serverAddress.equals(lastServer == null ? "singleplayer" : lastServer.address)
-                    || !source.worldKey().equals(currentWorldKey)) {
-                return;
-            }
-            mapLoading = false;
-            mapExternalPending = false;
-            if (error != null) {
-                mapDetail = "地图外链拉取失败，保留已有本机观景缓存；请检查外链后重试";
-                return;
-            }
-            importedScenes = result.scenes();
-            mapRegions = result.regions();
-            mapLoaded = true;
-            mapSceneCount = importedScenes.size();
-            mapFetchedAt = result.fetchedAtEpochMillis();
-            mapDetail = result.note();
-            refreshMapTargets(client);
+            if (generation != mapGeneration) return;
+            mapDetail = "地图请求已返回，等待资源包与世界就绪后处理";
+            pendingMapCompletion = () -> {
+                synchronizeWorld(client);
+                if (allowed && System.currentTimeMillis() - lastMessage > 8_000) {
+                    revokeServerAccess("导播服务响应超时");
+                }
+                if (generation != mapGeneration
+                        || !serverAddress.equals(lastServer == null ? "singleplayer" : lastServer.address)
+                        || !source.worldKey().equals(currentWorldKey)) {
+                    return;
+                }
+                mapLoading = false;
+                mapExternalPending = false;
+                if (error != null) {
+                    mapDetail = "地图外链拉取失败，保留已有本机观景缓存；请检查外链后重试";
+                    return;
+                }
+                importedScenes = result.scenes();
+                mapRegions = result.regions();
+                mapLoaded = true;
+                mapSceneCount = importedScenes.size();
+                mapFetchedAt = result.fetchedAtEpochMillis();
+                mapDetail = result.note();
+                refreshMapTargets(client);
+            };
         }));
     }
 
@@ -1022,7 +1052,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private void tickQueue(MinecraftClient client, long now) {
         pruneAutomaticQueue(client);
         ShowcaseQueue.Entry current = showcaseQueue.current();
-        boolean paused = client.currentScreen != null || client.isPaused();
+        boolean paused = client.currentScreen != null || client.isPaused() || !connectionSession.ready();
         if (current != null && current.target() instanceof ShowcaseTarget.Scene) {
             ShowcaseTarget latest = targets.stream().filter(target -> target.id().equals(current.target().id()))
                     .findFirst().orElse(null);
@@ -1068,6 +1098,13 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             showcaseQueue.finishCurrent();
         }
         if (automaticPatrolAllowed() && queueSettings.autoFill && showcaseQueue.pending().size() < queueSettings.bufferSize) {
+            if (showcaseQueue.current() == null && showcaseQueue.peek() == null
+                    && !paused && !mapLoading && !snapshotPending && !hasBusinessRequest() && now >= retreatUntil
+                    && showcaseQueue.beginNextRound(targets.stream().filter(this::targetWithinRules).toList(),
+                    queueSettings.sceneDurationSeconds, now)) {
+                invalidateAiDecision();
+                status = "本轮目标已播完，已随机开始下一轮";
+            }
             if (!tickAiDecision(client, now, paused)) {
                 showcaseQueue.fill(targets.stream().filter(this::automaticTargetAvailable).toList(), queueSettings.bufferSize,
                         queueSettings.sceneDurationSeconds, now);
@@ -1189,7 +1226,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "导播需要观察者模式";
             return false;
         }
-        resumeAfterReconnect = false;
+        if (!connectionSession.setupReady()) {
+            status = "等待资源包与世界加载完成后再启动导播";
+            return false;
+        }
+        connectionSession.cancelReconnect();
         shotTransition.clear();
         running = true;
         client.setCameraEntity(client.player);
@@ -1211,7 +1252,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
         showcaseQueue.finishCurrent();
         running = false;
-        resumeAfterReconnect = false;
+        connectionSession.cancelReconnect();
         requestedTarget = null;
         observeState = ObserveState.ENDED;
         previousTargetPosition = null;
@@ -1381,8 +1422,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private boolean targetAvailable(ShowcaseTarget target) {
+        return !showcaseQueue.isSuppressed(target.id(), System.currentTimeMillis()) && targetWithinRules(target);
+    }
+
+    private boolean targetWithinRules(ShowcaseTarget target) {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (!canOperate(client) || showcaseQueue.isSuppressed(target.id(), System.currentTimeMillis())) {
+        if (!canOperate(client)) {
             return false;
         }
         if (target instanceof ShowcaseTarget.Player player) {
@@ -1474,7 +1519,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         if (allowed && System.currentTimeMillis() - lastMessage > 8_000) {
             revokeServerAccess("导播服务响应超时");
         }
-        if (client.currentScreen != null || observeState == ObserveState.NOTICE
+        if (!connectionSession.ready() || client.currentScreen != null || observeState == ObserveState.NOTICE
                 || (sceneArrival != null && sceneArrival.teleport())) {
             player.setVelocity(Vec3d.ZERO);
             return;
@@ -2021,6 +2066,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     LocalMapSettings.Profile saved = localMapSettings.save(serverAddress, currentWorldKey,
                             commandString(command, "baseUrl", 1_024), commandString(command, "dynmapWorld", 256));
                     mapGeneration++;
+                    deferredMapSource = null;
+                    pendingMapCompletion = null;
                     mapMetadataPending = false;
                     mapRefreshRequested = false;
                     mapExternalPending = false;

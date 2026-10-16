@@ -26,6 +26,7 @@ public final class ShowcaseQueue {
     private final Map<String, Long> suppressedUntil = new HashMap<>();
     private final Map<String, Long> automaticSuppressedUntil = new HashMap<>();
     private final HashSet<String> playedTargetIds = new HashSet<>();
+    private String lastPlayedTargetId;
     private Entry current;
     private long remainingMillis;
     private long lastSceneTick;
@@ -157,6 +158,27 @@ public final class ShowcaseQueue {
         }
     }
 
+    /** Start another round only after the eligible pool, current shot and pending queue are exhausted. */
+    public boolean beginNextRound(List<ShowcaseTarget> candidates, int sceneDurationSeconds, long now) {
+        if (sceneDurationSeconds < 30 || sceneDurationSeconds > 600) {
+            throw new IllegalArgumentException("Scene duration must be 30..600 seconds");
+        }
+        if (current != null || !pending.isEmpty() || candidates.isEmpty()
+                || candidates.stream().anyMatch(target -> !playedTargetIds.contains(target.id()))) return false;
+        List<ShowcaseTarget> ready = candidates.stream().filter(target -> !isSuppressed(target.id(), now)
+                && automaticSuppressedUntil.getOrDefault(target.id(), 0L) <= now).toList();
+        if (ready.isEmpty()) return false;
+        List<ShowcaseTarget> firstChoices = ready.stream().filter(target -> !target.id().equals(lastPlayedTargetId)).toList();
+        if (firstChoices.isEmpty() && candidates.stream().anyMatch(target -> !target.id().equals(lastPlayedTargetId))) {
+            return false; // Wait for another point's backoff instead of immediately repeating the last shot.
+        }
+        // Retain progress for other worlds, and retain all failure/skip/player cooldowns.
+        for (ShowcaseTarget target : candidates) playedTargetIds.remove(target.id());
+        // Seed the first entry locally so a delayed AI reply cannot choose the previous round's last shot first.
+        fill(firstChoices.isEmpty() ? ready : firstChoices, 1, sceneDurationSeconds, now);
+        return true;
+    }
+
     /** Shared random pool for local fills and AI offers, excluding queued and already played targets. */
     public List<ShowcaseTarget> sampleAutomaticCandidates(List<ShowcaseTarget> candidates, int limit, long now) {
         if (limit < 1 || limit > 12) throw new IllegalArgumentException("Candidate limit must be 1..12");
@@ -278,6 +300,7 @@ public final class ShowcaseQueue {
 
     /** Called after a scene arrives or a permitted player actually enters the shot, never for a failed request. */
     public void markPlayed(String targetId) {
+        lastPlayedTargetId = targetId;
         if (playedTargetIds.add(targetId)) {
             pending.removeIf(entry -> entry.source() == Source.AUTO && entry.target().id().equals(targetId));
         }
@@ -286,6 +309,7 @@ public final class ShowcaseQueue {
     public void resetSession() {
         clear();
         playedTargetIds.clear();
+        lastPlayedTargetId = null;
     }
 
     public void clear() {

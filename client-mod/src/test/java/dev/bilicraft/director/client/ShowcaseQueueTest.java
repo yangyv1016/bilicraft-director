@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ShowcaseQueueTest {
     @Test
-    void playedTargetsStayOutOfLocalAndAiFillsUntilTheNextLoginButManualRepeatsRemainAllowed() {
+    void playedTargetsStayOutOfLocalAndAiFillsWithinTheRoundButManualRepeatsRemainAllowed() {
         ShowcaseQueue queue = new ShowcaseQueue(new Random(4));
         ShowcaseTarget scene = scene("played");
         ShowcaseTarget player = player();
@@ -20,7 +20,7 @@ class ShowcaseQueueTest {
         queue.finishCurrent();
         queue.start(queue.manualEntry(player, 180), 0);
         queue.markPlayed(player.id());
-        queue.clear(); // Stopping or changing worlds must not reset this login's played list.
+        queue.clear(); // Stopping or changing worlds must not reset the round's played list.
         assertFalse(queue.automaticCandidateAvailable(scene.id(), 86_400_000));
         assertFalse(queue.automaticCandidateAvailable(player.id(), 86_400_000));
         queue.fill(List.of(scene, player), 4, 120, 86_400_000);
@@ -74,7 +74,7 @@ class ShowcaseQueueTest {
     }
 
     @Test
-    void randomRefillVisitsEveryAvailableSceneOnceThenStopsInsteadOfRepeating() {
+    void randomRefillVisitsEveryAvailableSceneOnceBeforeAnExplicitRoundChange() {
         ShowcaseQueue queue = new ShowcaseQueue(new Random(42));
         List<ShowcaseTarget> candidates = java.util.stream.IntStream.range(0, 40)
                 .mapToObj(index -> scene("scene-" + index)).toList();
@@ -91,6 +91,131 @@ class ShowcaseQueueTest {
         assertEquals(40, new java.util.HashSet<>(played).size());
         assertNotEquals(candidates.stream().map(ShowcaseTarget::id).toList(), played);
         assertTrue(queue.sampleAutomaticCandidates(candidates, 12, 0).isEmpty());
+    }
+
+    @Test
+    void multipleRoundsVisitEachPointOnceAndNeverRepeatAcrossTheBoundary() {
+        ShowcaseQueue queue = new ShowcaseQueue(new Random(42));
+        List<ShowcaseTarget> candidates = java.util.stream.IntStream.range(0, 20)
+                .mapToObj(index -> scene("scene-" + index)).toList();
+        String last = null;
+        java.util.ArrayList<List<String>> rounds = new java.util.ArrayList<>();
+        for (int round = 0; round < 4; round++) {
+            if (round == 0) queue.fill(candidates, 4, 120, 0);
+            else {
+                assertTrue(queue.beginNextRound(candidates, 120, 0));
+                assertNotEquals(last, queue.peek().target().id());
+                // AI may try to put the previous last shot first; it can only append after the seeded entry.
+                queue.appendAutomatic(candidates, 4, 120, 0);
+                assertNotEquals(last, queue.peek().target().id());
+            }
+            java.util.ArrayList<String> played = new java.util.ArrayList<>();
+            while (queue.peek() != null) {
+                queue.start(queue.poll(), 0);
+                last = queue.current().target().id();
+                played.add(last);
+                queue.markPlayed(last);
+                assertFalse(queue.beginNextRound(candidates, 120, 0));
+                queue.finishCurrent();
+                queue.fill(candidates, 4, 120, 0);
+            }
+            assertEquals(20, played.size());
+            assertEquals(20, new java.util.HashSet<>(played).size());
+            rounds.add(played);
+        }
+        assertNotEquals(rounds.get(0), rounds.get(1));
+    }
+
+    @Test
+    void exhaustedRoundWaitsForCurrentAndManualQueueAndDoesNotMistakeAnEmptyPoolForCompletion() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget point = scene("point");
+        queue.start(queue.manualEntry(point, 60), 0);
+        queue.markPlayed(point.id());
+        assertFalse(queue.beginNextRound(List.of(point), 120, 0));
+        queue.finishCurrent();
+        queue.add(point, 0, 90);
+        List<ShowcaseQueue.Entry> manual = queue.pending();
+        assertFalse(queue.beginNextRound(List.of(point), 120, 0));
+        assertEquals(manual, queue.pending());
+        queue.clear();
+        assertFalse(queue.beginNextRound(List.of(), 120, 0));
+        assertFalse(queue.automaticCandidateAvailable(point.id(), 0));
+        ShowcaseTarget failed = scene("failed");
+        queue.suppress(failed.id(), 30_000);
+        assertFalse(queue.beginNextRound(List.of(point, failed), 120, 1));
+        assertFalse(queue.automaticCandidateAvailable(point.id(), 1));
+        queue.fill(List.of(point, failed), 4, 120, 30_000);
+        assertEquals(failed, queue.peek().target());
+    }
+
+    @Test
+    void roundChangeRetainsBackoffAndWaitsRatherThanRepeatingTheLastShotWhileOthersAreSuppressed() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget first = scene("first");
+        ShowcaseTarget last = scene("last");
+        queue.markPlayed(first.id());
+        queue.markPlayed(last.id());
+        queue.suppress(first.id(), 30_000);
+        assertFalse(queue.beginNextRound(List.of(first, last), 120, 29_999));
+        assertFalse(queue.automaticCandidateAvailable(last.id(), 29_999));
+        queue.suppressAutomatic(last.id(), 60_000);
+        assertTrue(queue.beginNextRound(List.of(first, last), 120, 30_000));
+        assertEquals(first, queue.peek().target());
+        assertFalse(queue.automaticCandidateAvailable(last.id(), 59_999));
+        assertTrue(queue.automaticCandidateAvailable(last.id(), 60_000));
+    }
+
+    @Test
+    void singlePointCanLoopButAnEmptyOrEntirelySuppressedPoolCannotResetProgress() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget only = scene("only");
+        queue.markPlayed(only.id());
+        queue.suppressAutomatic(only.id(), 30_000);
+        assertFalse(queue.beginNextRound(List.of(only), 60, 29_999));
+        assertTrue(queue.beginNextRound(List.of(only), 60, 30_000));
+        assertEquals(only, queue.peek().target());
+        assertEquals(60, queue.peek().durationSeconds());
+        assertEquals(ShowcaseQueue.Source.AUTO, queue.peek().source());
+    }
+
+    @Test
+    void newCandidatesArePlayedBeforeRolloverAndOtherWorldProgressSurvivesIt() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget point = scene("point");
+        ShowcaseTarget fresh = scene("fresh");
+        ShowcaseTarget nether = new ShowcaseTarget.Scene(new Message.SceneView("point", "point", Message.SceneKind.VIEWPOINT,
+                "minecraft:the_nether", 0, 80, 0, 6));
+        queue.markPlayed(nether.id());
+        queue.markPlayed(point.id());
+        assertFalse(queue.beginNextRound(List.of(point, fresh), 120, 0));
+        queue.fill(List.of(point, fresh), 4, 120, 0);
+        assertEquals(fresh, queue.peek().target());
+        queue.start(queue.poll(), 0);
+        queue.markPlayed(fresh.id());
+        queue.finishCurrent();
+        assertTrue(queue.beginNextRound(List.of(point, fresh), 120, 0));
+        assertEquals(point, queue.peek().target());
+        assertFalse(queue.automaticCandidateAvailable(nether.id(), 0));
+    }
+
+    @Test
+    void cyclingScenesNeverClearsAPlayersCooldownOrAllowsAiToBypassIt() {
+        ShowcaseQueue queue = new ShowcaseQueue(new Random(9));
+        ShowcaseTarget first = scene("first");
+        ShowcaseTarget last = scene("last");
+        ShowcaseTarget player = player();
+        queue.markPlayed(player.id());
+        queue.suppress(player.id(), 30 * 60_000);
+        queue.markPlayed(first.id());
+        queue.markPlayed(last.id());
+        assertTrue(queue.beginNextRound(List.of(first, last, player), 120, 1));
+        assertEquals(first, queue.peek().target());
+        assertEquals(0, queue.appendAutomatic(List.of(player), 4, 120, 1));
+        assertFalse(queue.sampleAutomaticCandidates(List.of(first, last, player), 12, 1).contains(player));
+        assertTrue(queue.isSuppressed(player.id(), 30 * 60_000 - 1));
+        assertFalse(queue.isSuppressed(player.id(), 30 * 60_000));
+        assertTrue(queue.automaticCandidateAvailable(player.id(), 30 * 60_000));
     }
 
     @Test
