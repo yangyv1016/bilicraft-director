@@ -43,12 +43,12 @@ GitHub Actions 的 [Build and test](https://github.com/yangyv1016/bilicraft-dire
 
 ## 安装与试用
 
-1. 将 server JAR 放入 Paper 的 `plugins/`。内部插件标识仍为 `BiliCraftAI`，已有配置、隐私目录和权限节点保留。首次启动会从旧 `config.yml` 导入默认世界；之后世界名单以 `plugins/BiliCraftAI/worlds.yml` 为准。
+1. 将 server JAR 放入 Paper 的 `plugins/`，移除旧版导播 JAR。内部插件名为 `BiliCraftDirector`，旧版数据目录会自动迁移，详见下方升级说明。首次启动会从旧 `config.yml` 导入默认世界；之后世界名单以 `plugins/BiliCraftDirector/worlds.yml` 为准。
 2. 将 client JAR 放入摄影机客户端的 `mods/`，安装上述 Fabric API。普通被观察玩家无需安装 Mod。
-3. 给摄影机账号授予 `bilicraftai.data.read`。例如通过 LuckPerms：
+3. 给摄影机账号授予 `bilicraftdirector.data.read`。例如通过 LuckPerms：
 
    ```text
-   /lp group 摄影机权限组 permission set bilicraftai.data.read true
+   /lp group 摄影机权限组 permission set bilicraftdirector.data.read true
    /lp user 摄影机账号 parent add 摄影机权限组
    ```
 
@@ -64,6 +64,16 @@ GitHub Actions 的 [Build and test](https://github.com/yangyv1016/bilicraft-dire
 自动模式下，观景点缓慢环绕，区域使用平滑八字路线，移动玩家采用后侧跟拍。也可实时选择环绕、跟拍、推进/拉远、横移、升降、摇镜和固定机位。路径只使用已加载区块。授权下拉的非玩家场景按服务器地址独立保存在客户端 `config/bilicraft-director-scenes/`；插件缺失、失权或响应超时后撤销玩家观察，保留本地巡游与场景能力。缓存只保存场景，不保存玩家数据；更换世界会清除旧许可并重新握手。
 
 网络请求超时或取消时，旧回复只负责结束原请求，不会用于新一次目标切换。本地场景仍可操作；若旧远程请求始终没有回复，界面会提示重连以恢复远程刷新，不会重新使用玩家许可。
+
+## 内部命名与旧版升级
+
+内部统一使用 `dev.bilicraft.director` Java 包、`BiliCraftDirectorClient` 入口、`bilicraftdirector` Mod ID/资源命名空间、`BiliCraftDirector` 插件名、`bilicraftdirector:director` 游戏通道、`bilicraftdirector.*` 权限和 `/director` 命令。AI 功能本身继续使用 `AiSettings` 等职责名称。
+
+从旧内部命名版本升级时，先退出客户端并停服，备份后移除旧版双端 JAR，再一起安装新版。服务端首次启动将 `plugins/BiliCraftAI/` 整体移动至 `plugins/BiliCraftDirector/`，黑名单、冷却、世界名单和地图映射原样保留；旧目录仍存在且新目录非空时停止服务，须停服核对合并并移走旧目录。若仍安装旧 `BiliCraftAI` 插件，新版拒绝启动。
+
+客户端首次加载时将 `config/bilicraft-ai.properties` 移为 `config/bilicraft-director.properties`，将 `config/bilicraft-ai-ai.local.properties` 移为 `config/bilicraft-director-ai.local.properties`。若对应新文件已存在，使用新文件并保留旧文件，不覆盖。队列、地图和场景缓存此前已使用 director 命名，保持原位置；快捷键标识已更名，自定义按键需在游戏设置中重新核对。
+
+旧 `bilicraftai.*` 授权不再生效，管理员须按原账号/组、显式允许或拒绝及上下文条件重新配置新节点。旧客户端与新服务端不共用通道，必须同步升级；旧 `/aiview` 命令不保留别名，改用 `/director`。
 
 ## 客户端本地中控台
 
@@ -85,9 +95,9 @@ GitHub Actions 的 [Build and test](https://github.com/yangyv1016/bilicraft-dire
 
 ## 世界与地图来源
 
-管理员可以使用 `/aiview worlds list`、`/aiview worlds add <实际世界名>`、`/aiview worlds remove <世界名>` 管理允许名单，权限为 `bilicraftai.worlds.manage`。命令输入可读世界名，文件按世界 UUID 保存；不会自动加载世界。各世界可配置自己的场景和排除区，客户端只展示当前世界目标。
+管理员可以使用 `/director worlds list`、`/director worlds add <实际世界名>`、`/director worlds remove <世界名>` 管理允许名单，权限为 `bilicraftdirector.worlds.manage`。命令输入可读世界名，文件按世界 UUID 保存；不会自动加载世界。各世界可配置自己的场景和排除区，客户端只展示当前世界目标。
 
-Dynmap 世界名与服务器世界名显式对应。管理员用 `/aiview map set <实际允许世界名> <Dynmap世界标识> <地图部署基础URL>` 配置，`map status/clear <世界名>` 查看或清除，权限 `bilicraftai.map.manage`。映射独立存于 `map-sources.yml`，按服务端世界 UUID 关联，不自动加载世界。提供的地图部署基础 URL 为 `https://map.bilicraft.com/s2/hyperion/`；Dynmap 世界标识有 `Paralon` 等，必须映射到实际对应世界，不能照抄猜测。
+Dynmap 世界名与服务器世界名显式对应。管理员用 `/director map set <实际允许世界名> <Dynmap世界标识> <地图部署基础URL>` 配置，`map status/clear <世界名>` 查看或清除，权限 `bilicraftdirector.map.manage`。映射独立存于 `map-sources.yml`，按服务端世界 UUID 关联，不自动加载世界。提供的地图部署基础 URL 为 `https://map.bilicraft.com/s2/hyperion/`；Dynmap 世界标识有 `Paralon` 等，必须映射到实际对应世界，不能照抄猜测。
 
 也可在 WebUI「配置 → 地图数据」为当前服务器与世界填写本机地图基础 URL 和 Dynmap 世界名。两项都填或都清空；本机配置优先，按服务器地址和世界隔离保存。保存不会下载，点击“拉取地图”后才由 Mod 直接读取 markers JSON，无需配套插件；未配置本机映射时，可使用已授权服务端提供的映射。已知服务端排除区继续约束本地执行。
 
@@ -97,7 +107,7 @@ Dynmap 世界名与服务器世界名显式对应。管理员用 `/aiview map se
 
 在 **F9 导播菜单 → AI 配置** 或本机 WebUI 的 **配置 → AI 提供方** 中选择 **DeepSeek（DS）** 或 **OpenAI GPT**，分别填写 API 地址、模型 ID 和 API Key。两家提供方的配置独立保留；切换提供方不会清空另一家的草稿。API Key 需为不含空白的 ASCII 字符串，不要粘贴字段名、引号或说明文字。
 
-点击 **保存到本机** 才会写入配置；**返回** 或 Esc 放弃未保存改动。配置文件位于游戏实例的 `config/bilicraft-ai-ai.local.properties`，包含明文密钥，只供本机使用，不要分享或提交；项目已通过 `*.local.properties` 排除该文件及保存用的临时文件。界面始终以星号遮挡密钥，禁止复制/剪切密钥字段，也不会在朗读提示中读出密钥，支持从剪贴板粘贴。配置不会发送给服务器，保存错误也不会记录字段或异常中的密钥内容。
+点击 **保存到本机** 才会写入配置；**返回** 或 Esc 放弃未保存改动。配置文件位于游戏实例的 `config/bilicraft-director-ai.local.properties`，包含明文密钥，只供本机使用，不要分享或提交；项目已通过 `*.local.properties` 排除该文件及保存用的临时文件。界面始终以星号遮挡密钥，禁止复制/剪切密钥字段，也不会在朗读提示中读出密钥，支持从剪贴板粘贴。配置不会发送给服务器，保存错误也不会记录字段或异常中的密钥内容。
 
 AI 策略接入已实现，**默认关闭，需显式启用并保存**。仅在导播已手动运行、自动补足开启且队尾缺少合法候选时请求模型；保存配置不会启动导播。两次策略请求至少间隔 60 秒，失败也计入间隔，期间继续本地选点。DeepSeek 显式关闭思考，输出上限 256 token；OpenAI 使用同样的输出上限，不支持非思考参数的模型会失败并回退本地。
 
@@ -111,9 +121,9 @@ WebUI 的 **测试已保存的连接** 只请求 `GET /models`，不发聊天请
 
 - 服务端先向目标玩家发送只有本人可见的 **15 秒预告**，含可点击的拒绝/停止、长期黑名单按钮。摄影机等待期间不开始跟随。
 - 每个按钮绑定该次请求的随机令牌，由服务端验证实际操作者、请求和有效期。其他玩家、过期或重复旧按钮不能取消无关的新会话。
-- 玩家点击拒绝，或执行 `/aiview stop`，或私聊摄影机 `停止跟随`，服务器立即撤销会话并通知对应摄影机，24 小时内不再选中该玩家。
-- `/aiview blacklist on` 持续禁止被跟随；`/aiview blacklist off` 解除；`/aiview status` 查看个人状态。黑名单和 epoch 冷却写入服务端 `privacy.properties`，重启保留。
-- 管理员可使用 `/aiview blacklist add <玩家名或UUID>` 和 `/aiview blacklist remove <玩家名或UUID>`，权限为 `bilicraftai.blacklist.manage`，控制台同样可用。名字仅解析在线或本机已缓存身份；未知名字使用 UUID。加入后立即撤销观察，移除不清除已有冷却。
+- 玩家点击拒绝，或执行 `/director stop`，或私聊摄影机 `停止跟随`，服务器立即撤销会话并通知对应摄影机，24 小时内不再选中该玩家。
+- `/director blacklist on` 持续禁止被跟随；`/director blacklist off` 解除；`/director status` 查看个人状态。黑名单和 epoch 冷却写入服务端 `privacy.properties`，重启保留。
+- 管理员可使用 `/director blacklist add <玩家名或UUID>` 和 `/director blacklist remove <玩家名或UUID>`，权限为 `bilicraftdirector.blacklist.manage`，控制台同样可用。名字仅解析在线或本机已缓存身份；未知名字使用 UUID。加入后立即撤销观察，移除不清除已有冷却。
 - 未拒绝后，服务端核准 3～8 分钟观察（未指定则随机），允许本次总时长按 ±10 秒调整。目标连续 10 秒无移动、明显转头、挥手或交互表现则结束；普通结束冷却 30 分钟。
 - 离线、跨世界、进入排除区、目标远距离传送（首版 32 格阈值）、客户端心跳超时或摄影机失去权限/观察者模式时撤销。
 - 偏好读写出错会明确记录并停止全部观察，不能把损坏数据当作空黑名单。

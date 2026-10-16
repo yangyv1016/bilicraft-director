@@ -1,9 +1,9 @@
 # BiliCraft 导播双端共享协议
 
 纯 Java 21 模块，无 Minecraft、Fabric、Paper 或 JSON 库依赖。通过游戏连接的
-`bilicraftai:director` custom payload 传输 `Codec.encode` 产生的原始字节。
+`bilicraftdirector:director` custom payload 传输 `Codec.encode` 产生的原始字节。
 
-每包依次包含 4 字节 magic `0x42434149`、2 字节 wire version `4`、1 字节消息类型，
+每包依次包含 4 字节 magic `0x42434452`（`BCDR`）、2 字节 wire version `4`、1 字节消息类型，
 随后为对应消息的固定顺序字段，数值采用大端序。固定字段布局不存在重复命名字段；
 任何额外字段作为尾随数据拒绝，Snapshot 同时禁止重复玩家 UUID 和重复场景 `(world, id)`。
 

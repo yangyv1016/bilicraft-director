@@ -26,7 +26,7 @@
 
 客户端本地 WebUI 的 HTTP 服务和每秒状态读取都发生在导播机器，服务端插件不托管网页。状态轮询只读 Mod 当前已有数据；只有人工刷新或切换目标时沿用原游戏协议请求。因此不能把网页轮询频率当作服务端快照/热力采样频率。
 
-当前 [DirectorPlugin](../server-plugin/src/main/java/dev/bilicraft/ai/server/DirectorPlugin.java) 尚无热力图：
+当前 [DirectorPlugin](../server-plugin/src/main/java/dev/bilicraft/director/server/DirectorPlugin.java) 尚无热力图：
 
 - `onMove` 对有效位置变化或明显转头更新活动时间和位置，挥手、交互及建造事件也更新活动状态。活动表按在线玩家保存，是 O(P)，不是完整轨迹。
 - `SnapshotRequest` 每个摄影机最多每秒一次；筛选摄影机当前允许世界的玩家、检查排除区、按距离排序，最多取 100 个玩家，不会计算跨世界距离。

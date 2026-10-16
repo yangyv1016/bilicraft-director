@@ -16,14 +16,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 const require = createRequire(new URL('../.tooling/test-client/package.json', import.meta.url));
 const minecraft = require('minecraft-protocol');
 const ChatMessage = require('prismarine-chat')('1.21.11');
-const CHANNEL = 'bilicraftai:director';
-const MAGIC = 0x42434149;
+const CHANNEL = 'bilicraftdirector:director';
+const MAGIC = 0x42434452;
 const VERSION = 4;
 const MAX_PACKET_BYTES = 30_000;
 const port = Number(process.env.SMOKE_PORT ?? 25590);
 assert(Number.isInteger(port) && port > 1023 && port <= 65535, 'Invalid SMOKE_PORT');
 const suffix = randomBytes(2).toString('hex');
-const group = `ai-smoke-${suffix}`;
+const group = `director-smoke-${suffix}`;
 const results = [];
 const bots = [];
 const terminal = createInterface({ input: process.stdin, output: process.stdout });
@@ -299,8 +299,8 @@ async function observe(camera, target) {
   assert(notice.deadline - sentAt >= 14_500 && notice.deadline - sentAt <= 16_000, 'Notice must reserve 15 seconds');
   const chat = await target.wait(() => target.chats.slice(chatsSince.get(target))
     .find(message => message.text.includes('将在 15 秒后开始')), 'targeted clickable notice');
-  const reject = chat.commands.find(command => command.startsWith('/aiview reject '));
-  const block = chat.commands.find(command => command.startsWith('/aiview block '));
+  const reject = chat.commands.find(command => command.startsWith('/director reject '));
+  const block = chat.commands.find(command => command.startsWith('/director block '));
   assert(reject && block, `Missing clickable actions in notice: ${JSON.stringify(chat)}`);
   await delay(350);
   for (const bot of bots) {
@@ -341,7 +341,7 @@ async function runSmoke() {
 
   await consoleStep('grant-inherited-luckperms-data-permission', [
     `lp creategroup ${group}`,
-    `lp group ${group} permission set bilicraftai.data.read true`,
+    `lp group ${group} permission set bilicraftdirector.data.read true`,
     `lp user ${camera.name} parent add ${group}`
   ]);
   const allowed = await camera.response(0, VERSION, message => message.type === 1, 'authorized handshake');
@@ -371,7 +371,7 @@ async function runSmoke() {
   assert(!camera.messages.slice(first.messagesSince).some(message => message.type === 5 && message.state === 1));
   pass('reject-during-notice-cancels-camera', rejected.reason);
   const rejectionStatusSince = target.chats.length;
-  target.command('aiview status');
+  target.command('director status');
   await target.wait(() => target.chats.slice(rejectionStatusSince)
     .find(chat => /冷却剩余约 1440 分钟/.test(chat.text)), '24-hour rejection cooldown status');
   pass('rejection-cooldown-is-24-hours');
@@ -398,7 +398,7 @@ async function runSmoke() {
   assert.match(blocked.reason, /黑名单/);
   pass('clickable-blacklist-cancels-camera', blocked.reason);
   const statusSince = block.chats.length;
-  block.command('aiview status');
+  block.command('director status');
   await block.wait(() => block.chats.slice(statusSince).find(chat => /长期黑名单：已开启/.test(chat.text)), 'blacklist status');
   pass('blacklist-status-enabled');
   await camera.response(4, block.client.uuid, message => message.type === 8, 'blacklisted target refusal');
@@ -415,13 +415,13 @@ async function runSmoke() {
   assert(inactivity.at - stoppedActivityAt >= 8500, 'Idle timeout happened unexpectedly early');
   pass('ten-second-no-activity-termination', `${inactivity.at - stoppedActivityAt}ms after activity stopped`);
   const idleStatusSince = idle.chats.length;
-  idle.command('aiview status');
+  idle.command('director status');
   await idle.wait(() => idle.chats.slice(idleStatusSince)
     .find(chat => /冷却剩余约 30 分钟/.test(chat.text)), '30-minute normal cooldown status');
   pass('normal-cooldown-is-30-minutes');
 
   await consoleStep('revoke-inherited-data-permission', [
-    `lp group ${group} permission unset bilicraftai.data.read`
+    `lp group ${group} permission unset bilicraftdirector.data.read`
   ]);
   const revoked = await camera.response(0, VERSION, message => message.type === 1 && !message.allowed, 'revoked data permission');
   assert.equal(revoked.allowed, false);
@@ -447,7 +447,7 @@ async function verifyPersistence() {
   for (const { role, expectedId, bot } of actors) {
     assert.equal(bot.client.uuid, expectedId, 'Offline identity must match the original test');
     const since = bot.chats.length;
-    bot.command('aiview status');
+    bot.command('director status');
     const status = await bot.wait(() => bot.chats.slice(since)
       .find(chat => chat.text.includes('长期黑名单：')), 'persisted privacy status');
     assert.equal(status.text.includes('长期黑名单：已开启'), role === 'BlockBot');

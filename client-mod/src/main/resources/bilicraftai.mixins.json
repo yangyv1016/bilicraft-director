@@ -1,7 +1,0 @@
-{
-  "required": true,
-  "package": "dev.bilicraft.ai.client.mixin",
-  "compatibilityLevel": "JAVA_21",
-  "client": ["KeyboardInputMixin", "MouseMixin", "ClientPlayerEntityMixin", "MinecraftClientMixin", "ChatHudMixin", "GameRendererMixin"],
-  "injectors": {"defaultRequire": 1}
-}

@@ -16,19 +16,19 @@
 
 ## 世界与权限
 
-已实现 `/aiview worlds list`、`/aiview worlds add <实际已加载世界名>`、`/aiview worlds remove <世界名>`，独立权限为 `bilicraftai.worlds.manage`，默认 OP，支持控制台。名称按服务器实际值精确匹配，不猜测下界/末地后缀或地图标识；列表显示实际名称和加载状态。
+已实现 `/director worlds list`、`/director worlds add <实际已加载世界名>`、`/director worlds remove <世界名>`，独立权限为 `bilicraftdirector.worlds.manage`，默认 OP，支持控制台。名称按服务器实际值精确匹配，不猜测下界/末地后缀或地图标识；列表显示实际名称和加载状态。
 
 名单覆盖管理员明确添加的主世界、下界、末地和自定义世界。`worlds.yml` 以真实世界 UUID 持久化，保存最后已知名称和各世界独立的场景、排除区；旧 `world-name` 仅在首次迁移时导入，移除后不会自动加回。不会自动加载世界，也没有跨世界传送。一次快照只提供摄影机当前世界的目标，玩家观察必须同世界。
 
 游戏连接中的世界标识使用运行时 `World#getKey()`，客户端按当前 dimension key 检查授权和场景；可读世界名用于管理，UUID 用于身份持久化，不能互相猜测映射。世界卸载时撤销该世界授权；配置或存储失败时停止全部数据与观察，读取损坏数据不会退回全允许。
 
-摄影机数据权限为 `bilicraftai.data.read`，通过真实发送账号的标准 `hasPermission` 校验，支持 LP 组继承；这不是被观察玩家白名单。黑名单管理与世界管理使用各自独立权限，数据访问权不隐含管理权。现有插件只通过已登录游戏连接提供数据，不开放服务器 HTTP 控制接口。
+摄影机数据权限为 `bilicraftdirector.data.read`，通过真实发送账号的标准 `hasPermission` 校验，支持 LP 组继承；这不是被观察玩家白名单。黑名单管理与世界管理使用各自独立权限，数据访问权不隐含管理权。现有插件只通过已登录游戏连接提供数据，不开放服务器 HTTP 控制接口。
 
 ## 玩家观察与退出
 
 观察前服务端向目标本人私密预告 15 秒，未拒绝才允许开始；开始后仍能随时停止。通知含可点击拒绝/停止、长期黑名单入口，按真实操作者与本次随机请求 token 校验，旧按钮不能影响新会话。
 
-玩家可执行 `/aiview stop` 或 `/tell 摄影机账号 停止跟随`，拒绝后 24 小时内不再选中。`/aiview blacklist on/off` 控制本人的长期黑名单；管理员可用 `/aiview blacklist add/remove <玩家名|UUID>` 管理指定身份，需独立的 `bilicraftai.blacklist.manage` 权限。黑名单和冷却重启保留，解除黑名单不清除已有冷却。
+玩家可执行 `/director stop` 或 `/tell 摄影机账号 停止跟随`，拒绝后 24 小时内不再选中。`/director blacklist on/off` 控制本人的长期黑名单；管理员可用 `/director blacklist add/remove <玩家名|UUID>` 管理指定身份，需独立的 `bilicraftdirector.blacklist.manage` 权限。黑名单和冷却重启保留，解除黑名单不清除已有冷却。
 
 协议现为 v4，两个安装 JAR 必须同步升级。玩家队列项创建时确定 180～480 秒计划，默认本地随机，可调整下一项 ±10 秒；播出前将计划提交服务端核准，0 仅作为服务端随机选择的源码兼容入口。服务端预告仍保持完整 15 秒，跟随总时长从 FOLLOWING 开始计算。
 

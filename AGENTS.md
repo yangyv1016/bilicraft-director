@@ -5,7 +5,7 @@
 ## 已确认的边界
 
 - 一个仓库，client-mod（Fabric 1.21.11）、server-plugin（Paper 1.21.11）、protocol（纯 Java 21），输出两个安装 JAR。
-- 对外名称为“BiliCraft 导播／BiliCraft 导播服务”；保留现有内部Mod ID、插件数据目录、协议channel、权限与玩家隐私数据。
+- 对外名称为“BiliCraft 导播／BiliCraft 导播服务”；内部使用 `dev.bilicraft.director`、Mod ID/资源命名空间 `bilicraftdirector`、插件名/数据目录 `BiliCraftDirector`、协议通道 `bilicraftdirector:director`、权限前缀 `bilicraftdirector` 和 `/director` 命令。升级迁移旧配置与玩家隐私数据，双端同步更新并重新授予新权限节点。
 - 导播为观察者，允许名单支持多个世界，管理员按实际世界名用命令增删，内部以UUID持久化；手动快捷键或菜单启动，巡游时屏蔽普通移动和鼠标转向，保留命令输入和菜单操作。
 - 自由摄影机、舒缓运镜；建筑探索约80%、玩家跟随约20%；区域间允许有限传送，允许穿墙，过渡淡出淡入。
 - 玩家跟随前定向私密通知15秒，未拒绝后才允许跟随。通知提供可点击拒绝/长期黑名单，操作由服务器校验并转发对应摄影机。按钮必须关联具体请求，防止旧按钮影响新请求。

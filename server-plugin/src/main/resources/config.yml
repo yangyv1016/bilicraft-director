@@ -1,5 +1,5 @@
 # 兼容旧版：仅在 worlds.yml 首次不存在时导入该实际已加载世界及下方配置。
-# worlds.yml 一旦生成即为权威名单；之后请用 /aiview worlds list/add/remove 管理世界。
+# worlds.yml 一旦生成即为权威名单；之后请用 /director worlds list/add/remove 管理世界。
 # 支持主世界、下界、末地和自定义世界，不自动加载世界或跨世界传送。
 world-name: world
 

@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "id": "bilicraftai",
+  "id": "bilicraftdirector",
   "version": "${version}",
   "name": "BiliCraft 导播",
   "description": "在服务端授权范围内展示玩家、观景点与巡游区域，提供本地运镜与 AI 配置。",
   "environment": "client",
   "license": "All-Rights-Reserved",
   "entrypoints": {
-    "client": ["dev.bilicraft.ai.client.BiliCraftAiClient"],
-    "modmenu": ["dev.bilicraft.ai.client.ModMenuIntegration"]
+    "client": ["dev.bilicraft.director.client.BiliCraftDirectorClient"],
+    "modmenu": ["dev.bilicraft.director.client.ModMenuIntegration"]
   },
-  "mixins": ["bilicraftai.mixins.json"],
+  "mixins": ["bilicraftdirector.mixins.json"],
   "depends": {
     "fabricloader": ">=0.18.4",
     "minecraft": "1.21.11",

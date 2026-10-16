@@ -1,32 +1,33 @@
 # BiliCraft 导播服务（第一阶段）
 
 安装 `bilicraft-director-server-0.1.0.jar` 到 Paper 1.21.11 的 `plugins/`，使用 Java 21。
-首次运行检查旧配置 `plugins/BiliCraftAI/config.yml` 的 `world-name`；首次迁移后，以 `worlds.yml` 中的世界 UUID 名单为权威。
-升级时移除旧的 `bilicraft-ai-server-*.jar`，避免同时加载两份插件；保留原有 `plugins/BiliCraftAI/`。
-插件内部标识仍为 `BiliCraftAI`，命令、权限节点、通道和隐私文件位置保持不变，无须迁移玩家隐私数据。
+首次运行检查旧配置 `plugins/BiliCraftDirector/config.yml` 的 `world-name`；首次迁移后，以 `worlds.yml` 中的世界 UUID 名单为权威。
+升级时先停服并移除旧版导播 JAR，避免同时加载两份插件。插件内部名为 `BiliCraftDirector`，命令为 `/director`，权限前缀为 `bilicraftdirector`。
+首次升级自动将 `plugins/BiliCraftAI/` 整体移动为 `plugins/BiliCraftDirector/`，包含配置、世界允许名单、地图映射、玩家黑名单与冷却。若新目录已存在且非空，插件停止服务并报告冲突，不覆盖或忽略旧隐私数据；先停服核对合并两份数据，再将旧目录移出 `plugins/`。
+旧 `bilicraftai.*` 权限不会自动授权新节点，请按原有账号/权限组重新授予对应的 `bilicraftdirector.*` 节点，核对显式拒绝和上下文条件。新通道为 `bilicraftdirector:director`，不接受旧通道。
 本轮使用协议 v4，须同时更新客户端与插件，旧版客户端不能继续握手。
 
-通过 LuckPerms 给摄影机账号或摄影机组授予 `bilicraftai.data.read`。该权限默认不授予任何人，OP 也不自动获得。
+通过 LuckPerms 给摄影机账号或摄影机组授予 `bilicraftdirector.data.read`。该权限默认不授予任何人，OP 也不自动获得。
 这是游戏连接中拉取数据、申请观察的调用权限，不是被观察玩家的白名单。普通玩家不需要 Mod 或额外权限。
 
 ## 玩家指令
 
 | 指令 | 效果 |
 | --- | --- |
-| `/aiview stop` | 取消待开始或当前观察，24 小时内不再选中自己；没有当前观察也可以提前设置此冷却 |
-| `/aiview blacklist on` | 长期禁止观察自己，直到主动解除 |
-| `/aiview blacklist off` | 解除长期黑名单，已有冷却仍然生效 |
-| `/aiview status` | 查看自己的黑名单及冷却 |
-| `/aiview blacklist add <玩家名或UUID>` | 管理员将指定玩家加入长期观察黑名单，并立即结束其待开始或当前观察 |
-| `/aiview blacklist remove <玩家名或UUID>` | 管理员解除指定玩家的长期黑名单，已有冷却仍然生效 |
+| `/director stop` | 取消待开始或当前观察，24 小时内不再选中自己；没有当前观察也可以提前设置此冷却 |
+| `/director blacklist on` | 长期禁止观察自己，直到主动解除 |
+| `/director blacklist off` | 解除长期黑名单，已有冷却仍然生效 |
+| `/director status` | 查看自己的黑名单及冷却 |
+| `/director blacklist add <玩家名或UUID>` | 管理员将指定玩家加入长期观察黑名单，并立即结束其待开始或当前观察 |
+| `/director blacklist remove <玩家名或UUID>` | 管理员解除指定玩家的长期黑名单，已有冷却仍然生效 |
 | `/tell 摄影机账号 停止跟随` | 仅拒绝该账号当前对自己的观察，效果等同 `stop` |
 
 开始前的 15 秒通知仅发给目标玩家，包含摄影机名字和可点击的拒绝、长期黑名单按钮。
 按钮携带随机请求 token；仅真实目标可以操作，旧按钮和重复按钮不能影响下一次观察。
 玩家停止后由服务端通知对应摄影机退出，无须自行寻找客户端状态。
 
-管理员的 `add/remove` 需要独立权限 `bilicraftai.blacklist.manage`，默认仅 OP；可通过 LP 授予管理组。
-摄影机的数据权限 `bilicraftai.data.read` 不包含黑名单管理权。控制台也可执行管理员指令。
+管理员的 `add/remove` 需要独立权限 `bilicraftdirector.blacklist.manage`，默认仅 OP；可通过 LP 授予管理组。
+摄影机的数据权限 `bilicraftdirector.data.read` 不包含黑名单管理权。控制台也可执行管理员指令。
 按名字操作仅识别在线或服务端已有缓存的玩家，不联网查询陌生名字；未知名字需要改用完整 UUID，或等待玩家上线后重试。
 UUID 直接对应持久化身份，可用于离线玩家；不要把离线测试服 UUID 与正式服身份混用。
 
@@ -73,13 +74,13 @@ UUID 直接对应持久化身份，可用于离线玩家；不要把离线测试
 
 ## 世界允许名单
 
-管理员使用下列命令，独立权限为 `bilicraftai.worlds.manage`（默认 OP），控制台也可执行：
+管理员使用下列命令，独立权限为 `bilicraftdirector.worlds.manage`（默认 OP），控制台也可执行：
 
 | 指令 | 效果 |
 | --- | --- |
-| `/aiview worlds list` | 列出允许世界的真实名称、UUID、已加载/未加载状态，以及当前已加载但未允许的世界 |
-| `/aiview worlds add <实际已加载世界名>` | 精确按实际名称添加当前已加载世界，初始场景与排除区为空 |
-| `/aiview worlds remove <世界名>` | 精确按实际或最后已知名称移除允许记录及该世界场景配置，立即撤销其数据/观察授权 |
+| `/director worlds list` | 列出允许世界的真实名称、UUID、已加载/未加载状态，以及当前已加载但未允许的世界 |
+| `/director worlds add <实际已加载世界名>` | 精确按实际名称添加当前已加载世界，初始场景与排除区为空 |
+| `/director worlds remove <世界名>` | 精确按实际或最后已知名称移除允许记录及该世界场景配置，立即撤销其数据/观察授权 |
 
 名称区分大小写，不进行模糊匹配，不按地标名、文件夹印象或下界/末地后缀推测。含空格的实际世界名可直接完整输入。
 支持下界、末地和自定义世界；添加不会加载世界，不会传送摄影机。摄影机需要先正常进入该世界，才能请求其候选。
@@ -89,7 +90,7 @@ UUID 直接对应持久化身份，可用于离线玩家；不要把离线测试
 不把 Paper 世界名猜测成客户端 dimension key。已允许世界卸载时撤销当前授权，保留配置；之后重新加载相同 UUID 时重新校验配置并启用。
 实际名称变化但 UUID 不变时更新最后已知名称；UUID 改变视为另一个世界，必须重新添加。
 
-生成的 `plugins/BiliCraftAI/worlds.yml` 结构如下，尖括号表示需要使用列表或命令得到的真实值：
+生成的 `plugins/BiliCraftDirector/worlds.yml` 结构如下，尖括号表示需要使用列表或命令得到的真实值：
 
 ```yaml
 version: 1
@@ -114,20 +115,20 @@ worlds:
 摄影机收到轻量元数据后，在本机中控手动拉取时直接连接外链；游戏连接不承载整份地图数据。
 普通 Snapshot 仍只返回前述手工场景和玩家，不混入地图文件。
 
-管理员或控制台使用独立权限 `bilicraftai.map.manage`（默认 OP）：
+管理员或控制台使用独立权限 `bilicraftdirector.map.manage`（默认 OP）：
 
 | 指令 | 效果 |
 | --- | --- |
-| `/aiview map set <实际允许世界名> <Dynmap世界标识> <部署base URL>` | 为已加载且已允许的实际世界建立明确映射，不按世界名猜测 Dynmap 标识 |
-| `/aiview map status <世界名>` | 查看已配置地址和 Dynmap 世界，不发起 HTTP 请求 |
-| `/aiview map clear <世界名>` | 删除该世界的外链映射 |
+| `/director map set <实际允许世界名> <Dynmap世界标识> <部署base URL>` | 为已加载且已允许的实际世界建立明确映射，不按世界名猜测 Dynmap 标识 |
+| `/director map status <世界名>` | 查看已配置地址和 Dynmap 世界，不发起 HTTP 请求 |
+| `/director map clear <世界名>` | 删除该世界的外链映射 |
 
 实际 Paper 世界名可含空格，填写在最后两个参数之前；Dynmap 标识与部署 URL 使用单个无空格参数。
 base URL 是地图部署根地址，例如 `https://map.example/s2/hyperion/`，不是 marker JSON 的完整地址。
 只允许 HTTP(S)，禁止账号密码、查询参数或片段；地址不能承载访问密钥。允许明确配置本机 HTTP，用于隔离联调。
 客户端请求固定路径 `tiles/_markers_/marker_<编码后的Dynmap世界标识>.json`，禁止 HTTP 重定向。
 
-映射独立原子保存于 `plugins/BiliCraftAI/map-sources.yml`，不修改允许名单或玩家隐私文件：
+映射独立原子保存于 `plugins/BiliCraftDirector/map-sources.yml`，不修改允许名单或玩家隐私文件：
 
 ```yaml
 version: 1

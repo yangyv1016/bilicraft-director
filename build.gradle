@@ -3,7 +3,7 @@ plugins {
 }
 
 allprojects {
-    group = 'dev.bilicraft.ai'
+    group = 'dev.bilicraft.director'
     version = '0.1.0'
     repositories {
         mavenCentral()
