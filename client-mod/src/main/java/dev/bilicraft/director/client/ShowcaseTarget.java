@@ -9,7 +9,7 @@ public sealed interface ShowcaseTarget permits ShowcaseTarget.Player, ShowcaseTa
 
     String label();
 
-    record Player(Message.PlayerView view) implements ShowcaseTarget {
+    record Player(Message.PlayerSummary view) implements ShowcaseTarget {
         @Override
         public String id() {
             return "player:" + view.id();

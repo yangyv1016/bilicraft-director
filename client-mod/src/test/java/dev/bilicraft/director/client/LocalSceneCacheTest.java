@@ -36,9 +36,9 @@ class LocalSceneCacheTest {
     Path directory;
 
     @Test
-    void versionFourAndFiveSceneCachesSurviveProtocolUpgrade() throws IOException {
+    void versionFourFiveAndSixSceneCachesSurviveProtocolUpgrade() throws IOException {
         byte[] previous = Codec.encode(new Message.Snapshot(List.of(), List.of(VIEWPOINT)));
-        for (short version : new short[]{4, 5}) {
+        for (short version : new short[]{4, 5, 6}) {
             ByteBuffer.wrap(previous).putShort(4, version);
             Files.write(directory.resolve(CACHE_NAME), previous);
 

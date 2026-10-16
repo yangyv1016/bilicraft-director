@@ -280,8 +280,8 @@ class ShowcaseQueueTest {
     }
 
     private static ShowcaseTarget player() {
-        return new ShowcaseTarget.Player(new Message.PlayerView(UUID.randomUUID(), "player", "minecraft:overworld",
-                0, 80, 0, 0, 0, 0));
+        return new ShowcaseTarget.Player(new Message.PlayerSummary(UUID.randomUUID(), "player", "minecraft:overworld",
+                Message.PlayerAvailability.AVAILABLE));
     }
 
     @Test

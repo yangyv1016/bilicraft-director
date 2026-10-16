@@ -2,6 +2,7 @@
 
 const element = (id) => document.getElementById(id);
 const kindNames = { PLAYER: "玩家", VIEWPOINT: "观景点", AREA: "巡游区域", IDLE: "挂机点" };
+const playerAvailabilityNames = { AVAILABLE: "可预告观察", OTHER_WORLD: "其他世界", IDLE: "暂无动作", SPECTATOR: "观察者", UNAVAILABLE: "暂不可观察" };
 const providerNames = { DEEPSEEK: "DeepSeek", OPENAI: "OpenAI" };
 const cameraModeNames = { AUTO: "自动", FOLLOW: "跟拍", ORBIT: "环绕", DOLLY: "推进 / 拉远", TRUCK: "横移", CRANE: "升降", PAN: "摇镜", STATIC: "固定机位" };
 const cameraModeHelp = {
@@ -321,14 +322,19 @@ function applyState(next) {
     renderAccount();
     renderChat();
     element("mapWorldLabel").textContent = next.world || "未进入世界";
-    element("runState").textContent = next.running ? (next.sceneArriving ? "前往场景" : next.motionPaused ? "移动暂停" : "运行中") : "已停止";
-    element("runState").classList.toggle("online", next.running && !next.motionPaused);
-    element("runState").classList.toggle("warning", next.running && next.motionPaused);
+    const terrainBlocked = next.terrain?.recoveryBlocked;
+    const manualOnly = !next.patrol.pending && !next.patrol.automatic;
+    const runWarning = next.motionPaused || terrainBlocked || manualOnly;
+    element("runState").textContent = !next.running ? "已停止" : terrainBlocked ? "地形保护" : manualOnly ? "仅手动"
+        : next.sceneArriving ? "前往场景" : next.motionPaused ? "移动暂停" : "运行中";
+    element("runState").classList.toggle("online", next.running && !runWarning);
+    element("runState").classList.toggle("warning", next.running && runWarning);
     element("runtimeStatus").textContent = next.status;
     element("motionState").textContent = !next.running ? "未运行" : next.sceneArriving ? "等待传送到位和区块加载"
         : next.motionPaused ? "已暂停，请查看执行状态" : "本地运镜";
     const observation = next.observation;
     element("observationState").textContent = observation.state === "NOTICE" ? "私密预告中"
+        : observation.state === "APPROACHING" ? "授权入镜准备中"
         : observation.state === "FOLLOWING" ? "已获准跟随" : "未进行";
     updateCountdown();
     element("teleportCapability").textContent = next.capabilities.teleport ? "同世界 OP 传送" : "当前客户端未接入";
@@ -337,7 +343,8 @@ function applyState(next) {
         : "当前客户端尚未接入场景传送";
     element("targetSource").textContent = !next.connected ? "保留最后同步视图"
         : next.patrol.pending ? "正在同步巡游范围 · 手动选点可用"
-            : !next.patrol.automatic ? "当前世界仅手动选点 · 自动巡游、本地及AI补点暂停"
+            : next.patrol.cacheFailed ? "巡游规则读取失败 · 自动巡游、本地及AI补点暂停"
+            : !next.patrol.automatic ? "当前世界未获巡游许可 · /director worlds list"
             : next.allowed ? "当前世界 · 服务端数据已连接" : "本地模式 · 景点、巡游与队列可用 · 玩家跟随未授权";
     element("cameraActual").textContent = "当前：" + cameraModeNames[next.settings.mode] + " · 距离 " + next.settings.radius
         + " 格 · 速度 " + next.settings.speed + " 格 / 秒 · 场景 Y " + next.settings.heightY
@@ -357,7 +364,8 @@ function applyState(next) {
     }
     element("queueSettingsActual").textContent = "当前：自动补足" + (next.queue.settings.autoFill ? "开启" : "关闭")
         + " · 缓存 " + next.queue.settings.bufferSize + " 项 · 场景默认 " + next.queue.settings.sceneDurationSeconds + " 秒"
-        + (next.patrol.automatic ? "" : " · 当前世界仅手动，自动补点暂停");
+        + (next.patrol.pending ? " · 正在同步巡游范围" : next.patrol.cacheFailed ? " · 巡游规则读取失败，自动补点暂停"
+            : next.patrol.automatic ? "" : " · 当前世界未获巡游许可 · /director worlds list");
     renderQueue();
     if (!aiInitialized) {
         currentProvider = next.ai.provider;
@@ -488,21 +496,25 @@ function renderQueue() {
     element("currentEntrySource").textContent = current ? (current.source === "MANUAL" ? "手动" : "自动") : "本地";
     element("currentEntryKind").textContent = current ? kindNames[current.kind] : "队列由 Mod 管理";
     const playerNotice = current?.kind === "PLAYER" && state.observation.state === "NOTICE";
+    const playerArriving = current?.kind === "PLAYER" && state.observation.state === "APPROACHING";
     element("currentEntryTime").textContent = !current ? (state.running ? "等待可用素材" : "手动启动后开始播出")
         : playerNotice ? "私密预告中 · 计划 " + formatDuration(current.durationSeconds)
+        : playerArriving ? "授权入镜准备中 · 尚未开始跟随计时"
         : current.remainingSeconds > 0 || current.durationSeconds > 0 ? "剩余 " + formatDuration(current.remainingSeconds)
             + (current.durationSeconds > 0 ? " / " + formatDuration(current.durationSeconds) : " · 服务端管理") : "服务端管理";
     element("currentEntryProgress").max = current?.durationSeconds > 0 ? current.durationSeconds : 100;
     element("currentEntryProgress").value = current?.durationSeconds > 0 ? Math.max(0, current.durationSeconds - current.remainingSeconds) : 0;
-    element("currentEntryProgress").hidden = !current || playerNotice || current.durationSeconds <= 0;
+    element("currentEntryProgress").hidden = !current || playerNotice || playerArriving || current.durationSeconds <= 0;
     element("nextEntryName").textContent = next ? next.name : "待播队列为空";
     element("nextEntryMeta").textContent = next ? kindNames[next.kind] + " · " + (next.source === "MANUAL" ? "手动" : "自动")
         + " · " + (next.durationSeconds > 0 ? formatDuration(next.durationSeconds) : "服务端管理") : queue.status;
     element("pendingCount").textContent = String(queue.pending.length);
     element("queueCapacity").textContent = queue.pending.length + " / 64";
     element("queueStatus").textContent = queue.status;
-    element("queueAutoSummary").textContent = state.patrol.pending ? "正在同步巡游范围 · 自动补足暂停"
-        : !state.patrol.automatic ? "当前世界仅手动 · 自动补足暂停"
+    element("queueAutoSummary").textContent = state.running && state.terrain?.recoveryBlocked ? "地形保护 · 自动补足暂停，等待当前机位安全"
+        : state.patrol.pending ? "正在同步巡游范围 · 自动补足暂停"
+        : state.patrol.cacheFailed ? "巡游规则读取失败 · 自动补足暂停"
+        : !state.patrol.automatic ? "当前世界未获巡游许可 · /director worlds list"
         : queue.settings.autoFill ? "自动补足 · 前向 " + queue.settings.bufferSize + " 项" : "自动补足已关闭";
     element("queuePosition").max = queue.pending.length + 1;
     if (document.activeElement !== element("queuePosition") && Number(element("queuePosition").value) > queue.pending.length + 1) {
@@ -605,6 +617,10 @@ function visibleTargets() {
         && (!search || (target.name + " " + target.world + " " + target.label).toLocaleLowerCase().includes(search)));
 }
 
+function mapTargets() {
+    return visibleTargets().filter((target) => target.world === state.world && target.x !== null && target.z !== null);
+}
+
 function renderTargets() {
     const targets = visibleTargets();
     element("targetCount").textContent = targets.length + " / " + (state?.targets.length || 0);
@@ -669,10 +685,13 @@ function renderTargets() {
         item.querySelector(".kind-dot").className = "kind-dot " + target.kind.toLowerCase();
         item.querySelector(".target-name").textContent = target.name;
         item.querySelector(".target-kind").textContent = kindNames[target.kind];
-        item.querySelector(".target-item-bottom").firstElementChild.textContent = target.label;
-        item.querySelector(".target-item-bottom").lastElementChild.textContent = !target.available ? "暂不可用"
+        item.querySelector(".target-item-bottom").firstElementChild.textContent = target.kind === "PLAYER"
+            ? target.world + " · " + target.label : target.label;
+        item.querySelector(".target-item-bottom").lastElementChild.textContent = target.kind === "PLAYER" && target.availability
+            ? playerAvailabilityNames[target.availability] : !target.available ? "暂不可用"
             : target.automaticAvailable ? "可展示" : "可手动展示";
-        item.querySelector(".target-select").title = "查看 " + target.name + " · " + target.world;
+        item.querySelector(".target-select").title = "查看 " + target.name + " · " + target.world
+            + (target.unavailableReason ? " · " + target.unavailableReason : "");
         item.querySelectorAll("[data-library-add]").forEach((button) => {
             button.disabled = !canQueueTarget(target);
             button.setAttribute("aria-label", "将 " + target.name + " 加入待播" + (button.dataset.libraryAdd === "head" ? "队首" : "队尾"));
@@ -715,12 +734,13 @@ function renderSelection() {
     element("selectionName").textContent = target ? target.name : "选择一个展示目标";
     element("selectionDescription").textContent = target ? target.label : "从素材库或位置图选择，再加入队列。";
     element("selectionWorld").textContent = target ? target.world : "—";
-    element("selectionCoordinates").textContent = target ? [target.x, target.y, target.z].map((n) => n.toFixed(1)).join(" / ") : "—";
+    element("selectionCoordinates").textContent = !target ? "—" : target.x === null ? "授权入镜后显示位置"
+        : [target.x, target.y, target.z].map((n) => n.toFixed(1)).join(" / ");
     element("selectionRadius").textContent = target && !["PLAYER", "IDLE"].includes(target.kind) ? target.radius + " 格" : "—";
     element("selectionStatus").textContent = !target ? "玩家目标始终经过 15 秒私密预告。"
         : !state.targets.some((candidate) => candidate.id === target.id) ? "此目标已不在当前候选中，请重新拉取。"
-            : !target.available ? "当前目标不可展示；请检查当前世界、边界、排除区或玩家授权。"
-                : target.kind === "PLAYER" ? "发起后先私密预告 15 秒；玩家可拒绝或加入长期黑名单。"
+            : !target.available ? target.unavailableReason || "当前目标不可展示；请检查当前世界、边界、排除区或玩家授权。"
+                : target.kind === "PLAYER" ? "先私密预告 15 秒；未拒绝且获服务端授权后才接近入镜。玩家可随时拒绝或加入长期黑名单。"
                     : target.kind === "IDLE" ? "传送到保存的机位与注视方向后完全静止，按场景时长结束；需本人 tp 权限，继续遵守巡游、边界与排除区规则。"
                     : (target.automaticAvailable ? "" : "仅手动选择，不参与自动或AI补点。")
                         + "远处或未加载场景由本账号发起传送，到位并加载后开始运镜。";
@@ -1276,7 +1296,7 @@ function drawMap() {
     for (let z = Math.ceil(top / step) * step; z < top + mapHeight / mapView.scale; z += step) {
         context.fillText(Math.round(z).toString(), 8, (z - top) * mapView.scale - 5);
     }
-    const targets = visibleTargets();
+    const targets = mapTargets();
     for (const target of targets) {
         const x = (target.x - left) * mapView.scale;
         const z = (target.z - top) * mapView.scale;
@@ -1346,7 +1366,7 @@ function drawMap() {
 }
 
 function fitMap() {
-    const points = visibleTargets().map((target) => ({ x: target.x, z: target.z, radius: ["PLAYER", "IDLE"].includes(target.kind) ? 0 : target.radius }));
+    const points = mapTargets().map((target) => ({ x: target.x, z: target.z, radius: ["PLAYER", "IDLE"].includes(target.kind) ? 0 : target.radius }));
     if (state?.camera) points.push({ x: state.camera.x, z: state.camera.z, radius: 0 });
     if (!points.length) return;
     const minX = Math.min(...points.map((point) => point.x - point.radius));
@@ -1405,7 +1425,7 @@ canvas.addEventListener("pointerup", (event) => {
         const z = event.clientY - bounds.top;
         let closest = null;
         let distance = 18;
-        for (const target of visibleTargets()) {
+        for (const target of mapTargets()) {
             const targetX = (target.x - mapView.x) * mapView.scale + mapWidth / 2;
             const targetZ = (target.z - mapView.z) * mapView.scale + mapHeight / 2;
             const delta = Math.hypot(targetX - x, targetZ - z);

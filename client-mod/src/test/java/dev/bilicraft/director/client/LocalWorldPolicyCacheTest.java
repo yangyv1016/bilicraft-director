@@ -47,17 +47,19 @@ class LocalWorldPolicyCacheTest {
     }
 
     @Test
-    void localVersionFivePolicyRetainsPatrolAndExclusionsWhileNetworkRejectsIt() throws IOException {
+    void localVersionFiveAndSixPoliciesRetainPatrolAndExclusionsWhileNetworkRejectsThem() throws IOException {
         LocalWorldPolicyCache cache = new LocalWorldPolicyCache(directory);
         cache.save(SERVER, POLICY);
         Path file;
         try (var paths = Files.list(directory)) { file = paths.findFirst().orElseThrow(); }
         byte[] old = Codec.encode(POLICY);
-        ByteBuffer.wrap(old).putShort(4, (short) 5);
-        Files.write(file, old);
-        assertEquals(POLICY, cache.load(SERVER, WORLD));
-        assertArrayEquals(old, Files.readAllBytes(file));
-        assertThrows(IOException.class, () -> Codec.decode(old));
+        for (short version : new short[]{5, 6}) {
+            ByteBuffer.wrap(old).putShort(4, version);
+            Files.write(file, old);
+            assertEquals(POLICY, cache.load(SERVER, WORLD));
+            assertArrayEquals(old, Files.readAllBytes(file));
+            assertThrows(IOException.class, () -> Codec.decode(old));
+        }
     }
 
     @Test

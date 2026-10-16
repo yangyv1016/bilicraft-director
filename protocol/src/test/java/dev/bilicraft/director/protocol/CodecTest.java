@@ -26,15 +26,15 @@ class CodecTest {
                 new Message.Hello(Protocol.VERSION),
                 new Message.HelloReply(Protocol.VERSION, true, "minecraft:overworld", "已允许连接"),
                 new Message.HelloReply(Protocol.VERSION, false, "minecraft:overworld", "权限不足"),
-                new Message.SnapshotRequest(),
+                new Message.SnapshotRequest(1),
                 new Message.Snapshot(List.of(), List.of()),
                 new Message.Snapshot(List.of(PLAYER), List.of(SCENE)),
                 new Message.Snapshot(List.of(), List.of(new Message.SceneView("city", "城区",
                         Message.SceneKind.AREA, "world", 30, 90, 60, 48))),
                 new Message.ObserveRequest(TARGET),
                 new Message.ObserveRequest(TARGET, 480),
-                new Message.ObserveUpdate(Message.ObserveState.NOTICE, TARGET, 15_000, 180, "预告"),
-                new Message.ObserveUpdate(Message.ObserveState.FOLLOWING, TARGET, 180_000, 180, ""),
+                new Message.ObserveUpdate(Message.ObserveState.NOTICE, TARGET, 15_000, 180, "预告", TARGET, null),
+                new Message.ObserveUpdate(Message.ObserveState.FOLLOWING, TARGET, 180_000, 180, "", TARGET, null),
                 new Message.ObserveUpdate(Message.ObserveState.ENDED, TARGET, 0, 0, "已拒绝"),
                 new Message.ObserveUpdate(Message.ObserveState.ENDED, null, 0, 0, "停止"),
                 new Message.Stop(),
@@ -77,7 +77,7 @@ class CodecTest {
         ByteBuffer.wrap(invalidVersion).putShort(4, (short) (Protocol.VERSION + 1));
         assertThrows(IOException.class, () -> Codec.decode(invalidVersion));
 
-        for (int oldVersion : List.of(1, 2, 3)) {
+        for (int oldVersion : List.of(1, 2, 3, 4, 5, 6)) {
             byte[] previousVersion = Codec.encode(new Message.Heartbeat());
             ByteBuffer.wrap(previousVersion).putShort(4, (short) oldVersion);
             assertThrows(IOException.class, () -> Codec.decode(previousVersion));
@@ -406,8 +406,8 @@ class CodecTest {
     void observationUpdatesRequireConfirmedActiveDurationAndZeroEndedDuration() throws IOException {
         for (int invalid : List.of(0, 179, 481)) {
             assertThrows(IOException.class, () -> Codec.encode(new Message.ObserveUpdate(
-                    Message.ObserveState.FOLLOWING, TARGET, 500_000, invalid, "")));
-            byte[] bytes = Codec.encode(new Message.ObserveUpdate(Message.ObserveState.FOLLOWING, TARGET, 500_000, 480, ""));
+                    Message.ObserveState.FOLLOWING, TARGET, 500_000, invalid, "", TARGET, null)));
+            byte[] bytes = Codec.encode(new Message.ObserveUpdate(Message.ObserveState.FOLLOWING, TARGET, 500_000, 480, "", TARGET, null));
             ByteBuffer.wrap(bytes).putInt(33, invalid);
             assertThrows(IOException.class, () -> Codec.decode(bytes));
         }
@@ -442,7 +442,7 @@ class CodecTest {
     @Test
     void v3DurationMessagesRejectEveryTruncatedPrefixAndTrailingBytes() throws IOException {
         for (Message message : List.of(new Message.ObserveRequest(TARGET, 180),
-                new Message.ObserveUpdate(Message.ObserveState.NOTICE, TARGET, 15_000, 180, "预告"),
+                new Message.ObserveUpdate(Message.ObserveState.NOTICE, TARGET, 15_000, 180, "预告", TARGET, null),
                 new Message.DurationRequest(TARGET, 190),
                 new Message.DurationReply(TARGET, true, Message.ObserveState.FOLLOWING, 190, 205_000, "已调整"))) {
             byte[] valid = Codec.encode(message);

@@ -58,7 +58,29 @@ public final class Codec {
                 writeString(output, reply.worldKey(), MAX_WORLD_BYTES);
                 writeString(output, reply.detail(), MAX_TEXT_BYTES);
             }
-            case Message.SnapshotRequest ignored -> output.writeByte(2);
+            case Message.SnapshotRequest request -> {
+                output.writeByte(2);
+                if (request.requestId() <= 0) throw new IOException("Snapshot request ID must be positive");
+                output.writeLong(request.requestId());
+            }
+            case Message.SnapshotPage page -> {
+                output.writeByte(15);
+                validateSnapshotPage(page);
+                output.writeLong(page.requestId());
+                output.writeShort(page.pageIndex());
+                output.writeShort(page.pageCount());
+                output.writeShort(page.players().size());
+                for (Message.PlayerSummary player : page.players()) {
+                    writeUuid(output, player.id());
+                    writeString(output, player.name(), MAX_NAME_BYTES);
+                    writeString(output, player.world(), MAX_WORLD_BYTES);
+                    output.writeByte(player.availability().ordinal());
+                }
+                output.writeShort(page.scenes().size());
+                for (Message.SceneView scene : page.scenes()) {
+                    writeScene(output, scene);
+                }
+            }
             case Message.Snapshot snapshot -> {
                 output.writeByte(3);
                 if (snapshot.players().size() > Protocol.MAX_PLAYERS) {
@@ -70,16 +92,7 @@ public final class Codec {
                     if (!ids.add(player.id())) {
                         throw new IOException("Duplicate player ID");
                     }
-                    validatePosition(player);
-                    writeUuid(output, player.id());
-                    writeString(output, player.name(), MAX_NAME_BYTES);
-                    writeString(output, player.world(), MAX_WORLD_BYTES);
-                    output.writeDouble(player.x());
-                    output.writeDouble(player.y());
-                    output.writeDouble(player.z());
-                    output.writeFloat(player.yaw());
-                    output.writeFloat(player.pitch());
-                    output.writeLong(player.lastActivityEpochMillis());
+                    writePlayer(output, player);
                 }
                 if (snapshot.scenes().size() > Protocol.MAX_SCENES) {
                     throw new IOException("Too many scenes in snapshot");
@@ -90,15 +103,7 @@ public final class Codec {
                     if (!sceneKeys.add(new SceneKey(scene.world(), scene.id()))) {
                         throw new IOException("Duplicate scene ID in the same world");
                     }
-                    validateScene(scene);
-                    writeString(output, scene.id(), MAX_SCENE_ID_BYTES);
-                    writeString(output, scene.name(), MAX_SCENE_NAME_BYTES);
-                    output.writeByte(scene.kind().ordinal());
-                    writeString(output, scene.world(), MAX_WORLD_BYTES);
-                    output.writeDouble(scene.x());
-                    output.writeDouble(scene.y());
-                    output.writeDouble(scene.z());
-                    output.writeDouble(scene.radius());
+                    writeScene(output, scene);
                 }
             }
             case Message.ObserveRequest request -> {
@@ -111,27 +116,24 @@ public final class Codec {
             }
             case Message.ObserveUpdate update -> {
                 output.writeByte(5);
-                if (update.state() == null) {
-                    throw new IOException("Observation state is required");
-                }
-                if (update.targetId() == null && update.state() != Message.ObserveState.ENDED) {
-                    throw new IOException("Active observation requires a target");
-                }
+                validateObserveUpdate(update);
                 output.writeByte(update.state().ordinal());
                 output.writeBoolean(update.targetId() != null);
                 if (update.targetId() != null) {
                     writeUuid(output, update.targetId());
                 }
                 output.writeLong(update.deadlineEpochMillis());
-                if (update.state() == Message.ObserveState.ENDED) {
-                    if (update.durationSeconds() != 0) {
-                        throw new IOException("Ended observation must have zero duration");
-                    }
-                } else {
-                    validateDuration(update.durationSeconds());
-                }
                 output.writeInt(update.durationSeconds());
                 writeString(output, update.reason(), MAX_TEXT_BYTES);
+                output.writeBoolean(update.sessionId() != null);
+                if (update.sessionId() != null) writeUuid(output, update.sessionId());
+                output.writeBoolean(update.targetPose() != null);
+                if (update.targetPose() != null) writePlayer(output, update.targetPose());
+            }
+            case Message.ObserveReady ready -> {
+                output.writeByte(16);
+                writeUuid(output, ready.sessionId());
+                writeUuid(output, ready.targetId());
             }
             case Message.Stop ignored -> output.writeByte(6);
             case Message.Heartbeat ignored -> output.writeByte(7);
@@ -214,7 +216,11 @@ public final class Codec {
             case 0 -> new Message.Hello(input.readInt());
             case 1 -> new Message.HelloReply(input.readInt(), readBoolean(input),
                     readString(input, MAX_WORLD_BYTES), readString(input, MAX_TEXT_BYTES));
-            case 2 -> new Message.SnapshotRequest();
+            case 2 -> {
+                long requestId = input.readLong();
+                if (requestId <= 0) throw new IOException("Snapshot request ID must be positive");
+                yield new Message.SnapshotRequest(requestId);
+            }
             case 3 -> {
                 int count = input.readUnsignedShort();
                 if (count > Protocol.MAX_PLAYERS) {
@@ -223,15 +229,10 @@ public final class Codec {
                 ArrayList<Message.PlayerView> players = new ArrayList<>(count);
                 HashSet<UUID> ids = new HashSet<>();
                 for (int index = 0; index < count; index++) {
-                    UUID id = readUuid(input);
-                    if (!ids.add(id)) {
+                    Message.PlayerView player = readPlayer(input);
+                    if (!ids.add(player.id())) {
                         throw new IOException("Duplicate player ID");
                     }
-                    Message.PlayerView player = new Message.PlayerView(id,
-                            readString(input, MAX_NAME_BYTES), readString(input, MAX_WORLD_BYTES),
-                            input.readDouble(), input.readDouble(), input.readDouble(),
-                            input.readFloat(), input.readFloat(), input.readLong());
-                    validatePosition(player);
                     players.add(player);
                 }
                 int sceneCount = input.readUnsignedShort();
@@ -240,22 +241,11 @@ public final class Codec {
                 }
                 ArrayList<Message.SceneView> scenes = new ArrayList<>(sceneCount);
                 HashSet<SceneKey> sceneKeys = new HashSet<>();
-                Message.SceneKind[] kinds = Message.SceneKind.values();
                 for (int index = 0; index < sceneCount; index++) {
-                    String id = readString(input, MAX_SCENE_ID_BYTES);
-                    String name = readString(input, MAX_SCENE_NAME_BYTES);
-                    int kindId = input.readUnsignedByte();
-                    if (kindId >= kinds.length) {
-                        throw new IOException("Unknown scene kind");
-                    }
-                    String world = readString(input, MAX_WORLD_BYTES);
-                    if (!sceneKeys.add(new SceneKey(world, id))) {
+                    Message.SceneView scene = readScene(input);
+                    if (!sceneKeys.add(new SceneKey(scene.world(), scene.id()))) {
                         throw new IOException("Duplicate scene ID in the same world");
                     }
-                    Message.SceneView scene = new Message.SceneView(id, name, kinds[kindId],
-                            world, input.readDouble(), input.readDouble(),
-                            input.readDouble(), input.readDouble());
-                    validateScene(scene);
                     scenes.add(scene);
                 }
                 yield new Message.Snapshot(players, scenes);
@@ -276,19 +266,14 @@ public final class Codec {
                 }
                 Message.ObserveState state = states[stateId];
                 UUID targetId = readBoolean(input) ? readUuid(input) : null;
-                if (targetId == null && state != Message.ObserveState.ENDED) {
-                    throw new IOException("Active observation requires a target");
-                }
                 long deadline = input.readLong();
                 int seconds = input.readInt();
-                if (state == Message.ObserveState.ENDED) {
-                    if (seconds != 0) {
-                        throw new IOException("Ended observation must have zero duration");
-                    }
-                } else {
-                    validateDuration(seconds);
-                }
-                yield new Message.ObserveUpdate(state, targetId, deadline, seconds, readString(input, MAX_TEXT_BYTES));
+                String reason = readString(input, MAX_TEXT_BYTES);
+                UUID sessionId = readBoolean(input) ? readUuid(input) : null;
+                Message.PlayerView pose = readBoolean(input) ? readPlayer(input) : null;
+                Message.ObserveUpdate update = new Message.ObserveUpdate(state, targetId, deadline, seconds, reason, sessionId, pose);
+                validateObserveUpdate(update);
+                yield update;
             }
             case 6 -> new Message.Stop();
             case 7 -> new Message.Heartbeat();
@@ -360,12 +345,146 @@ public final class Codec {
                 }
                 yield new Message.IdlePointSync(world, point);
             }
+            case 15 -> {
+                long requestId = input.readLong();
+                int pageIndex = input.readUnsignedShort();
+                int pageCount = input.readUnsignedShort();
+                int playerCount = input.readUnsignedShort();
+                if (playerCount > Protocol.MAX_SNAPSHOT_PAGE_PLAYERS) throw new IOException("Too many page players");
+                ArrayList<Message.PlayerSummary> players = new ArrayList<>(playerCount);
+                Message.PlayerAvailability[] availabilities = Message.PlayerAvailability.values();
+                for (int index = 0; index < playerCount; index++) {
+                    UUID id = readUuid(input);
+                    String name = readString(input, MAX_NAME_BYTES);
+                    String world = readString(input, MAX_WORLD_BYTES);
+                    int availability = input.readUnsignedByte();
+                    if (availability >= availabilities.length) throw new IOException("Unknown player availability");
+                    players.add(new Message.PlayerSummary(id, name, world, availabilities[availability]));
+                }
+                int sceneCount = input.readUnsignedShort();
+                if (sceneCount > Protocol.MAX_SNAPSHOT_PAGE_SCENES) throw new IOException("Too many page scenes");
+                ArrayList<Message.SceneView> scenes = new ArrayList<>(sceneCount);
+                for (int index = 0; index < sceneCount; index++) scenes.add(readScene(input));
+                Message.SnapshotPage page = new Message.SnapshotPage(requestId, pageIndex, pageCount, players, scenes);
+                validateSnapshotPage(page);
+                yield page;
+            }
+            case 16 -> new Message.ObserveReady(readUuid(input), readUuid(input));
             default -> throw new IOException("Unknown message type");
         };
         if (input.available() != 0) {
             throw new IOException("Trailing packet data");
         }
         return message;
+    }
+
+    private static void writePlayer(DataOutputStream output, Message.PlayerView player) throws IOException {
+        validatePosition(player);
+        writeUuid(output, player.id());
+        writeString(output, player.name(), MAX_NAME_BYTES);
+        writeString(output, player.world(), MAX_WORLD_BYTES);
+        output.writeDouble(player.x());
+        output.writeDouble(player.y());
+        output.writeDouble(player.z());
+        output.writeFloat(player.yaw());
+        output.writeFloat(player.pitch());
+        output.writeLong(player.lastActivityEpochMillis());
+    }
+
+    private static Message.PlayerView readPlayer(DataInputStream input) throws IOException {
+        Message.PlayerView player = new Message.PlayerView(readUuid(input),
+                readString(input, MAX_NAME_BYTES), readString(input, MAX_WORLD_BYTES),
+                input.readDouble(), input.readDouble(), input.readDouble(),
+                input.readFloat(), input.readFloat(), input.readLong());
+        validatePosition(player);
+        return player;
+    }
+
+    private static void writeScene(DataOutputStream output, Message.SceneView scene) throws IOException {
+        validateScene(scene);
+        writeString(output, scene.id(), MAX_SCENE_ID_BYTES);
+        writeString(output, scene.name(), MAX_SCENE_NAME_BYTES);
+        output.writeByte(scene.kind().ordinal());
+        writeString(output, scene.world(), MAX_WORLD_BYTES);
+        output.writeDouble(scene.x());
+        output.writeDouble(scene.y());
+        output.writeDouble(scene.z());
+        output.writeDouble(scene.radius());
+    }
+
+    private static Message.SceneView readScene(DataInputStream input) throws IOException {
+        String id = readString(input, MAX_SCENE_ID_BYTES);
+        String name = readString(input, MAX_SCENE_NAME_BYTES);
+        int kindId = input.readUnsignedByte();
+        Message.SceneKind[] kinds = Message.SceneKind.values();
+        if (kindId >= kinds.length) throw new IOException("Unknown scene kind");
+        Message.SceneView scene = new Message.SceneView(id, name, kinds[kindId], readString(input, MAX_WORLD_BYTES),
+                input.readDouble(), input.readDouble(), input.readDouble(), input.readDouble());
+        validateScene(scene);
+        return scene;
+    }
+
+    private static void validateSnapshotPage(Message.SnapshotPage page) throws IOException {
+        if (page.requestId() <= 0 || page.pageCount() < 1 || page.pageCount() > Protocol.MAX_SNAPSHOT_PAGES
+                || page.pageIndex() < 0 || page.pageIndex() >= page.pageCount()
+                || page.players().size() > Protocol.MAX_SNAPSHOT_PAGE_PLAYERS
+                || page.scenes().size() > Protocol.MAX_SNAPSHOT_PAGE_SCENES) {
+            throw new IOException("Invalid snapshot page identity or size");
+        }
+        HashSet<UUID> playerIds = new HashSet<>();
+        for (Message.PlayerSummary player : page.players()) {
+            if (player.id() == null || !playerIds.add(player.id()) || player.availability() == null) {
+                throw new IOException("Missing or duplicate page player identity or availability");
+            }
+            validateIdentity(player.name());
+            validateIdentity(player.world());
+        }
+        HashSet<SceneKey> sceneKeys = new HashSet<>();
+        for (Message.SceneView scene : page.scenes()) {
+            validateIdentity(scene.id());
+            validateIdentity(scene.name());
+            validateIdentity(scene.world());
+            if (!sceneKeys.add(new SceneKey(scene.world(), scene.id()))) {
+                throw new IOException("Duplicate page scene ID in the same world");
+            }
+            validateScene(scene);
+        }
+    }
+
+    private static void validateIdentity(String value) throws IOException {
+        if (value == null || value.isBlank() || value.codePoints().anyMatch(Character::isISOControl)) {
+            throw new IOException("Missing or invalid identity text");
+        }
+    }
+
+    private static void validateObserveUpdate(Message.ObserveUpdate update) throws IOException {
+        if (update.state() == null) throw new IOException("Observation state is required");
+        if (update.state() == Message.ObserveState.ENDED) {
+            if (update.durationSeconds() != 0 || update.deadlineEpochMillis() != 0) {
+                throw new IOException("Ended observation must have zero duration and deadline");
+            }
+        } else {
+            if (update.targetId() == null || update.sessionId() == null || update.deadlineEpochMillis() <= 0) {
+                throw new IOException("Active observation requires target, session and positive deadline");
+            }
+            validateDuration(update.durationSeconds());
+        }
+        if (update.state() == Message.ObserveState.APPROACHING) {
+            Message.PlayerView pose = update.targetPose();
+            if (pose == null || !update.targetId().equals(pose.id())) {
+                throw new IOException("Approaching observation requires the matching target pose");
+            }
+            validatePosition(pose);
+            validateIdentity(pose.name());
+            validateIdentity(pose.world());
+            if (Math.abs(pose.x()) > 30_000_000 || Math.abs(pose.y()) > 30_000_000
+                    || Math.abs(pose.z()) > 30_000_000 || pose.pitch() < -90 || pose.pitch() > 90
+                    || pose.lastActivityEpochMillis() < 0) {
+                throw new IOException("Invalid approach target coordinates, pitch or activity time");
+            }
+        } else if (update.targetPose() != null) {
+            throw new IOException("Only approaching observations may carry a target pose");
+        }
     }
 
     private static void writeUuid(DataOutputStream output, UUID id) throws IOException {

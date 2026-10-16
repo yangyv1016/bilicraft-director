@@ -13,6 +13,7 @@ import java.util.function.BooleanSupplier;
 /** Main-thread session ownership, notice deadlines and unforgeable action links. */
 final class ObservationSessions {
     static final long NOTICE_MILLIS = 15_000;
+    static final long APPROACH_MILLIS = 15_000;
     static final long HEARTBEAT_TIMEOUT_MILLIS = 10_000;
     private final Map<UUID, Session> byCamera = new HashMap<>();
     private final Map<UUID, Session> byTarget = new HashMap<>();
@@ -45,16 +46,31 @@ final class ObservationSessions {
         Session session = byTarget.get(actor);
         if (session == null || !session.token.equals(token)
                 || now - session.heartbeatAt >= HEARTBEAT_TIMEOUT_MILLIS
+                || session.approaching && !session.following && now >= session.approachDeadline
                 || session.following && now >= session.followDeadline) {
             return null;
         }
         return session;
     }
 
-    /** Authorization is checked at the transition, including the exact 15-second boundary. */
-    boolean startFollowing(UUID camera, long now, BooleanSupplier authorized) {
+    /** The notice grants only a bounded approach; it never starts the playback or inactivity clocks. */
+    boolean beginApproach(UUID camera, long now, BooleanSupplier authorized) {
         Session session = byCamera.get(camera);
-        if (session == null || session.following || now < session.noticeDeadline || !authorized.getAsBoolean()) {
+        if (session == null || session.approaching || session.following
+                || now < session.noticeDeadline || !authorized.getAsBoolean()) {
+            return false;
+        }
+        session.approaching = true;
+        session.approachDeadline = now + APPROACH_MILLIS;
+        return true;
+    }
+
+    /** A ready packet belongs to the sender's current session and still needs real server authorization. */
+    boolean startFollowing(UUID camera, UUID token, UUID target, long now, BooleanSupplier authorized) {
+        Session session = byCamera.get(camera);
+        if (session == null || !session.token.equals(token) || !session.target.equals(target)
+                || !session.approaching || session.following || now >= session.approachDeadline
+                || !authorized.getAsBoolean()) {
             return false;
         }
         session.following = true;
@@ -79,7 +95,8 @@ final class ObservationSessions {
         }
         if (requestedMillis > session.followDurationMillis) {
             long projectedEnd = session.following ? session.followingStartedAt + requestedMillis
-                    : Math.max(now, session.noticeDeadline) + requestedMillis;
+                    : (session.approaching ? session.approachDeadline
+                    : Math.max(now, session.noticeDeadline) + APPROACH_MILLIS) + requestedMillis;
             reservation.reserveUntil(projectedEnd);
             if (!authorized.getAsBoolean()) {
                 return new DurationChange(ChangeStatus.NOT_AUTHORIZED, session);
@@ -116,8 +133,10 @@ final class ObservationSessions {
         final long noticeDeadline;
         long followDurationMillis;
         long heartbeatAt;
+        long approachDeadline;
         long followingStartedAt;
         long followDeadline;
+        boolean approaching;
         boolean following;
 
         Session(UUID camera, UUID target, UUID token, long now, long noticeDeadline, long followDurationMillis) {

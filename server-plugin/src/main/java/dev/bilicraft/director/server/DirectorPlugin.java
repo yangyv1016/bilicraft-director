@@ -4,6 +4,7 @@ import dev.bilicraft.director.protocol.Codec;
 import dev.bilicraft.director.protocol.Message;
 import dev.bilicraft.director.protocol.Message.ObserveState;
 import dev.bilicraft.director.protocol.Protocol;
+import dev.bilicraft.director.protocol.SnapshotPages;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -309,27 +310,15 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             }
             sendWorldPolicy(camera);
             send(camera, new Message.HelloReply(Protocol.VERSION, true, camera.getWorld().getKey().toString(), "连接正常"));
-        } else if (message instanceof Message.SnapshotRequest) {
+        } else if (message instanceof Message.SnapshotRequest request) {
             long previous = lastSnapshot.getOrDefault(camera.getUniqueId(), 0L);
             if (now - previous < 1_000) {
                 send(camera, new Message.Error("候选列表每秒最多请求一次"));
                 return;
             }
             lastSnapshot.put(camera.getUniqueId(), now);
-            List<Message.PlayerView> candidates = Bukkit.getOnlinePlayers().stream()
-                    .filter(target -> targetEligible(camera, target)
-                            && privacy.available(target.getUniqueId(), now)
-                            && sessions.forTarget(target.getUniqueId()) == null
-                            && now - activity.getOrDefault(target.getUniqueId(), 0L) < 10_000
-                            && camera.getLocation().distanceSquared(target.getLocation()) <= 128 * 128)
-                    .sorted(Comparator.comparingDouble(target -> camera.getLocation().distanceSquared(target.getLocation())))
-                    .limit(100)
-                    .map(target -> {
-                        Location location = target.getLocation();
-                        return new Message.PlayerView(target.getUniqueId(), target.getName(), target.getWorld().getKey().toString(),
-                                location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch(),
-                                activity.get(target.getUniqueId()));
-                    }).toList();
+            List<Message.PlayerSummary> candidates = PlayerRoster.snapshot(camera, Bukkit.getOnlinePlayers(), privacy,
+                    sessions, activity, this::insideViewingArea, now);
             Location cameraLocation = camera.getLocation();
             WorldContext context = worldContexts.get(camera.getWorld().getUID());
             SceneConfiguration.Bounds worldBorder = currentWorldBorder(context.world());
@@ -337,9 +326,19 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                     .filter(scene -> SceneConfiguration.fitsPatrolArea(scene, worldBorder, context.exclusions()))
                     .sorted(Comparator.comparingDouble(scene -> cameraLocation.distanceSquared(
                             new Location(context.world(), scene.x(), scene.y(), scene.z())))).toList();
-            send(camera, new Message.Snapshot(candidates, nearbyScenes));
+            List<Message.SnapshotPage> pages;
+            try {
+                pages = SnapshotPages.create(request.requestId(), candidates, nearbyScenes);
+            } catch (IllegalArgumentException exception) {
+                getLogger().warning("无法构建完整展示目标快照：" + exception.getMessage());
+                send(camera, new Message.Error("完整目标快照超出容量或内容无效，未发送裁剪数据"));
+                return;
+            }
+            for (Message.SnapshotPage page : pages) send(camera, page);
         } else if (message instanceof Message.ObserveRequest request) {
             requestObservation(camera, request.targetId(), request.requestedDurationSeconds(), now);
+        } else if (message instanceof Message.ObserveReady request) {
+            confirmObservationReady(camera, request, now);
         } else {
             send(camera, new Message.Error("客户端不能发送此类消息"));
         }
@@ -361,8 +360,8 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
         }
         if (target == null || !targetEligible(camera, target) || !privacy.available(targetId, now)
                 || sessions.forTarget(targetId) != null
-                || camera.getLocation().distanceSquared(target.getLocation()) > 128 * 128) {
-            send(camera, new Message.Error("目标当前不可观察，或不在附近加载范围内"));
+                || now - activity.getOrDefault(targetId, 0L) >= 10_000) {
+            send(camera, new Message.Error("目标当前不可观察、跨世界或已无动作超过 10 秒"));
             return;
         }
         long duration = (requestedSeconds == 0
@@ -370,7 +369,8 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 : requestedSeconds) * 1_000;
         try {
             // Reserve the full session plus cooldown before notifying. A restart cannot erase it.
-            privacy.setCooldown(targetId, now + ObservationSessions.NOTICE_MILLIS + duration + NORMAL_COOLDOWN_MILLIS);
+            privacy.setCooldown(targetId, now + ObservationSessions.NOTICE_MILLIS + ObservationSessions.APPROACH_MILLIS
+                    + duration + NORMAL_COOLDOWN_MILLIS);
         } catch (IOException exception) {
             failStorage("隐私状态", exception);
             send(camera, new Message.Error("隐私状态无法保存，观察已禁用"));
@@ -385,12 +385,39 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 .clickEvent(ClickEvent.runCommand("/director block " + session.token))
                 .hoverEvent(HoverEvent.showText(Component.text("持续禁止跟随，直到你执行 /director blacklist off")));
         target.sendMessage(Component.text("[BiliCraft 导播] " + camera.getName()
-                        + " 将在 15 秒后开始跟随展示，计划持续 " + duration / 1_000 + " 秒（3～8 分钟内可调整）。未拒绝将自动开始。\n", NamedTextColor.AQUA)
+                        + " 将在 15 秒预告结束后接近你，镜头就绪再开始跟随展示，计划持续 " + duration / 1_000
+                        + " 秒（3～8 分钟内可调整）。未拒绝将自动开始。\n", NamedTextColor.AQUA)
                 .append(reject).append(Component.space()).append(blacklist)
                 .append(Component.text("\n也可输入 /director stop 或 /tell " + camera.getName()
                         + " 停止跟随，开始后同样随时有效。", NamedTextColor.GRAY)));
         send(camera, new Message.ObserveUpdate(ObserveState.NOTICE, targetId, session.noticeDeadline,
-                (int) (session.followDurationMillis / 1_000), "等待目标玩家 15 秒拒绝窗口"));
+                (int) (session.followDurationMillis / 1_000), "等待目标玩家 15 秒拒绝窗口", session.token, null));
+    }
+
+    private void confirmObservationReady(Player camera, Message.ObserveReady request, long now) {
+        ObservationSessions.Session session = sessions.forCamera(camera.getUniqueId());
+        if (session == null || !session.token.equals(request.sessionId()) || !session.target.equals(request.targetId())) {
+            return; // A delayed ready from an ended session cannot disturb its successor.
+        }
+        Player target = Bukkit.getPlayer(session.target);
+        String invalidReason = invalidSessionReason(session, camera, target, now);
+        if (invalidReason != null) {
+            finish(session, invalidReason, NORMAL_COOLDOWN_MILLIS);
+            return;
+        }
+        if (!session.approaching || session.following) return;
+        if (camera.getLocation().distanceSquared(target.getLocation()) > 96 * 96) {
+            finish(session, "摄影机尚未到达获准玩家附近", NORMAL_COOLDOWN_MILLIS);
+            return;
+        }
+        if (sessions.startFollowing(camera.getUniqueId(), request.sessionId(), request.targetId(), now,
+                () -> invalidSessionReason(session, camera, target, System.currentTimeMillis()) == null
+                        && camera.getLocation().distanceSquared(target.getLocation()) <= 96 * 96)) {
+            send(camera, new Message.ObserveUpdate(ObserveState.FOLLOWING, session.target, session.followDeadline,
+                    (int) (session.followDurationMillis / 1_000), "已到达并获准跟随", session.token, null));
+            target.sendMessage(Component.text("[BiliCraft 导播] " + camera.getName()
+                    + " 已开始跟随。可随时点击先前的拒绝按钮，或使用 /director stop。", NamedTextColor.AQUA));
+        }
     }
 
     private void requestDuration(Player camera, Message.DurationRequest request, long now) {
@@ -439,9 +466,11 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             return;
         }
         int totalSeconds = (int) (session.followDurationMillis / 1_000);
-        long deadline = session.following ? session.followDeadline : session.noticeDeadline;
+        long deadline = session.following ? session.followDeadline
+                : session.approaching ? session.approachDeadline : session.noticeDeadline;
         boolean accepted = change.status() == ObservationSessions.ChangeStatus.APPLIED;
-        ObserveState state = session.following ? ObserveState.FOLLOWING : ObserveState.NOTICE;
+        ObserveState state = session.following ? ObserveState.FOLLOWING
+                : session.approaching ? ObserveState.APPROACHING : ObserveState.NOTICE;
         String reason = accepted ? "玩家跟随时长已由服务器核准" : "总时长必须在 180～480 秒内，且每次只能增加或减少 10 秒";
         if (accepted && session.following && deadline <= System.currentTimeMillis()) {
             finish(session, "缩短后本次观察时长结束", NORMAL_COOLDOWN_MILLIS);
@@ -459,21 +488,24 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             String invalidReason = invalidSessionReason(session, camera, target, now);
             if (invalidReason != null) {
                 finish(session, invalidReason, NORMAL_COOLDOWN_MILLIS);
-            } else if (!session.following && now >= session.noticeDeadline) {
+            } else if (!session.approaching && !session.following && now >= session.noticeDeadline) {
                 try {
-                    // The actual follow may start after a delayed tick, so renew its restart reservation first.
+                    // A delayed tick must still reserve the whole approach and follow before granting entry.
                     privacy.setCooldown(session.target, Math.max(privacy.cooldownUntil(session.target),
-                            now + session.followDurationMillis + NORMAL_COOLDOWN_MILLIS));
+                            now + ObservationSessions.APPROACH_MILLIS + session.followDurationMillis + NORMAL_COOLDOWN_MILLIS));
                 } catch (IOException exception) {
                     failStorage("观察开始预留", exception);
                     return;
                 }
-                if (sessions.startFollowing(session.camera, now,
+                if (sessions.beginApproach(session.camera, now,
                         () -> invalidSessionReason(session, camera, target, System.currentTimeMillis()) == null)) {
-                    send(camera, new Message.ObserveUpdate(ObserveState.FOLLOWING, session.target, session.followDeadline,
-                            (int) (session.followDurationMillis / 1_000), "预告结束，允许跟随"));
-                    target.sendMessage(Component.text("[BiliCraft 导播] " + camera.getName()
-                            + " 已开始跟随。可随时点击先前的拒绝按钮，或使用 /director stop。", NamedTextColor.AQUA));
+                    Location location = target.getLocation();
+                    Message.PlayerView pose = new Message.PlayerView(target.getUniqueId(), target.getName(),
+                            target.getWorld().getKey().toString(), location.getX(), location.getY(), location.getZ(),
+                            location.getYaw(), location.getPitch(), activity.getOrDefault(session.target, 0L));
+                    send(camera, new Message.ObserveUpdate(ObserveState.APPROACHING, session.target, session.approachDeadline,
+                            (int) (session.followDurationMillis / 1_000), "预告结束，允许本人在当前世界接近目标",
+                            session.token, pose));
                 }
             }
         }
@@ -488,6 +520,12 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
         }
         if (target == null || !targetEligible(camera, target) || privacy.blacklisted(session.target)) {
             return "目标离线、隐藏、跨世界、进入排除区或禁止观察";
+        }
+        if (session.approaching && !session.following && now >= session.approachDeadline) {
+            return "获准接近玩家超时";
+        }
+        if (!session.following && now - activity.getOrDefault(session.target, 0L) >= 10_000) {
+            return "目标连续 10 秒无动作";
         }
         if (session.following) {
             long lastActivity = Math.max(session.followingStartedAt, activity.getOrDefault(session.target, 0L));
@@ -514,11 +552,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     }
 
     private boolean targetEligible(Player camera, Player target) {
-        return !camera.getUniqueId().equals(target.getUniqueId()) && target.isOnline()
-                && camera.getWorld().equals(target.getWorld())
-                && target.getGameMode() != GameMode.SPECTATOR && camera.canSee(target)
-                && !target.isInvisible() && target.getMetadata("vanished").stream().noneMatch(value -> value.asBoolean())
-                && insideViewingArea(target.getLocation());
+        return PlayerRoster.eligible(camera, target, this::insideViewingArea);
     }
 
     private boolean insideViewingArea(Location location) {
@@ -591,7 +625,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
         }
         Player camera = Bukkit.getPlayer(session.camera);
         if (camera != null) {
-            send(camera, new Message.ObserveUpdate(ObserveState.ENDED, session.target, 0, 0, reason));
+            send(camera, new Message.ObserveUpdate(ObserveState.ENDED, session.target, 0, 0, reason, session.token, null));
         }
         Player target = Bukkit.getPlayer(session.target);
         if (target != null) {
@@ -606,7 +640,8 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             sessions.end(session);
             Player camera = Bukkit.getPlayer(session.camera);
             if (camera != null) {
-                send(camera, new Message.ObserveUpdate(ObserveState.ENDED, session.target, 0, 0, "配置或隐私存储故障，禁止观察"));
+                send(camera, new Message.ObserveUpdate(ObserveState.ENDED, session.target, 0, 0,
+                        "配置或隐私存储故障，禁止观察", session.token, null));
             }
             Player target = Bukkit.getPlayer(session.target);
             if (target != null) {
@@ -621,32 +656,6 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             return;
         }
         try {
-            if (message instanceof Message.Snapshot snapshot) {
-                int overhead = Codec.encode(new Message.Snapshot(List.of(), List.of())).length;
-                int usedBytes = overhead;
-                List<Message.PlayerView> selectedPlayers = new ArrayList<>();
-                List<Message.SceneView> selectedScenes = new ArrayList<>();
-                // Interleave nearby players and scenes so neither category consumes the whole packet.
-                for (int index = 0; index < Math.max(snapshot.players().size(), snapshot.scenes().size()); index++) {
-                    if (index < snapshot.players().size()) {
-                        Message.PlayerView player = snapshot.players().get(index);
-                        int size = Codec.encode(new Message.Snapshot(List.of(player), List.of())).length - overhead;
-                        if (usedBytes + size <= Protocol.MAX_PACKET_BYTES) {
-                            selectedPlayers.add(player);
-                            usedBytes += size;
-                        }
-                    }
-                    if (index < snapshot.scenes().size()) {
-                        Message.SceneView scene = snapshot.scenes().get(index);
-                        int size = Codec.encode(new Message.Snapshot(List.of(), List.of(scene))).length - overhead;
-                        if (usedBytes + size <= Protocol.MAX_PACKET_BYTES) {
-                            selectedScenes.add(scene);
-                            usedBytes += size;
-                        }
-                    }
-                }
-                message = new Message.Snapshot(selectedPlayers, selectedScenes);
-            }
             camera.sendPluginMessage(this, Protocol.CHANNEL, Codec.encode(message));
         } catch (IOException exception) {
             getLogger().log(Level.SEVERE, "无法编码发送给 " + camera.getName() + " 的摄影机消息", exception);

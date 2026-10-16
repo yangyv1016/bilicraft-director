@@ -31,9 +31,9 @@ public final class LocalWorldPolicyCache {
         } catch (NoSuchFileException exception) {
             return null;
         }
-        // Only the unchanged local v5 policy layout is migrated; network v5 remains rejected.
+        // Only unchanged local v5/v6 policy layouts are migrated; old network versions remain rejected.
         if (bytes.length >= 7 && ByteBuffer.wrap(bytes).getInt() == Protocol.MAGIC
-                && ByteBuffer.wrap(bytes).getShort(4) == 5 && bytes[6] == 13) {
+                && (ByteBuffer.wrap(bytes).getShort(4) == 5 || ByteBuffer.wrap(bytes).getShort(4) == 6) && bytes[6] == 13) {
             ByteBuffer.wrap(bytes).putShort(4, (short) Protocol.VERSION);
         }
         Message message = Codec.decode(bytes);

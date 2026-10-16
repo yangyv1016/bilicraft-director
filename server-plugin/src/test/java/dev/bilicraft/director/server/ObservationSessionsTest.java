@@ -21,13 +21,19 @@ class ObservationSessionsTest {
     @Test
     void noticeNeverGrantsEarlyAndRechecksAuthorizationAtExactDeadline() {
         ObservationSessions.Session session = sessions.begin(camera, target, 1_000, 180_000);
-        assertFalse(sessions.startFollowing(camera, 15_999, () -> true));
+        assertFalse(sessions.beginApproach(camera, 15_999, () -> true));
+        assertFalse(sessions.startFollowing(camera, session.token, target, 15_999, () -> true));
         assertFalse(session.following);
-        assertFalse(sessions.startFollowing(camera, 16_000, () -> false));
+        assertFalse(sessions.beginApproach(camera, 16_000, () -> false));
         assertFalse(session.following);
-        assertTrue(sessions.startFollowing(camera, 16_000, () -> true));
-        assertEquals(196_000, session.followDeadline);
-        assertFalse(sessions.startFollowing(camera, 16_001, () -> true));
+        assertTrue(sessions.beginApproach(camera, 16_000, () -> true));
+        assertFalse(session.following);
+        assertEquals(31_000, session.approachDeadline);
+        assertEquals(0, session.followDeadline);
+        assertFalse(sessions.startFollowing(camera, session.token, target, 16_001, () -> false));
+        assertTrue(sessions.startFollowing(camera, session.token, target, 20_000, () -> true));
+        assertEquals(200_000, session.followDeadline);
+        assertFalse(sessions.startFollowing(camera, session.token, target, 20_001, () -> true));
     }
 
     @Test
@@ -59,7 +65,7 @@ class ObservationSessionsTest {
         assertSame(session, sessions.forAction(target, session.token, 15_000));
         sessions.end(session);
         AtomicBoolean queried = new AtomicBoolean();
-        assertFalse(sessions.startFollowing(camera, 15_000, () -> {
+        assertFalse(sessions.beginApproach(camera, 15_000, () -> {
             queried.set(true);
             return true;
         }));
@@ -82,7 +88,8 @@ class ObservationSessionsTest {
         ObservationSessions.Session session = sessions.begin(camera, target, 0, 180_000);
         assertNull(sessions.forAction(target, session.token, 10_000));
         session.heartbeatAt = 15_000;
-        assertTrue(sessions.startFollowing(camera, 15_000, () -> true));
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        assertTrue(sessions.startFollowing(camera, session.token, target, 15_000, () -> true));
         session.heartbeatAt = 194_999;
         assertSame(session, sessions.forAction(target, session.token, 194_999));
         assertNull(sessions.forAction(target, session.token, 195_000));
@@ -98,17 +105,19 @@ class ObservationSessionsTest {
         assertSame(session, change.session());
         assertEquals(16_000, session.noticeDeadline);
         assertEquals(190_000, session.followDurationMillis);
-        assertEquals(206_000, reservedEnd.get());
+        assertEquals(221_000, reservedEnd.get());
         assertFalse(session.following);
-        assertFalse(sessions.startFollowing(camera, 15_999, () -> true));
-        assertTrue(sessions.startFollowing(camera, 16_000, () -> true));
+        assertFalse(sessions.beginApproach(camera, 15_999, () -> true));
+        assertTrue(sessions.beginApproach(camera, 16_000, () -> true));
+        assertTrue(sessions.startFollowing(camera, session.token, target, 16_000, () -> true));
         assertEquals(206_000, session.followDeadline);
     }
 
     @Test
     void followingAdjustmentUsesOriginalStartAndDoesNotResetTheIdleClock() throws IOException {
         ObservationSessions.Session session = sessions.begin(camera, target, 1_000, 240_000);
-        assertTrue(sessions.startFollowing(camera, 20_000, () -> true));
+        assertTrue(sessions.beginApproach(camera, 16_000, () -> true));
+        assertTrue(sessions.startFollowing(camera, session.token, target, 20_000, () -> true));
         AtomicLong reservedEnd = new AtomicLong();
         assertEquals(ObservationSessions.ChangeStatus.APPLIED,
                 sessions.changeDuration(camera, target, 250, 50_000, () -> true, reservedEnd::set).status());
@@ -126,7 +135,8 @@ class ObservationSessionsTest {
     @Test
     void currentDurationCanShrinkPastNowWithoutExtendingOrReanchoringItsDeadline() throws IOException {
         ObservationSessions.Session session = sessions.begin(camera, target, 0, 240_000);
-        assertTrue(sessions.startFollowing(camera, 15_000, () -> true));
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        assertTrue(sessions.startFollowing(camera, session.token, target, 15_000, () -> true));
         assertTrue(session.followDeadline > 250_000);
         assertEquals(ObservationSessions.ChangeStatus.APPLIED,
                 sessions.changeDuration(camera, target, 230, 250_000, () -> true,
@@ -213,7 +223,8 @@ class ObservationSessionsTest {
     @Test
     void failedReservationNeverAcknowledgesOrMutatesARequestedExtension() {
         ObservationSessions.Session session = sessions.begin(camera, target, 0, 180_000);
-        assertTrue(sessions.startFollowing(camera, 15_000, () -> true));
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        assertTrue(sessions.startFollowing(camera, session.token, target, 15_000, () -> true));
         assertThrows(IOException.class, () -> sessions.changeDuration(camera, target, 190, 16_000, () -> true,
                 ignored -> {
                     assertEquals(180_000, session.followDurationMillis);
@@ -230,12 +241,64 @@ class ObservationSessionsTest {
         Path file = directory.resolve("privacy.properties");
         PrivacyStore privacy = new PrivacyStore(file);
         ObservationSessions.Session session = sessions.begin(camera, target, 1_000, 180_000);
-        privacy.setCooldown(target, session.noticeDeadline + session.followDurationMillis + cooldown);
+        privacy.setCooldown(target, session.noticeDeadline + ObservationSessions.APPROACH_MILLIS + session.followDurationMillis + cooldown);
         assertEquals(ObservationSessions.ChangeStatus.APPLIED,
                 sessions.changeDuration(camera, target, 190, 2_000, () -> true,
                         followEnd -> privacy.setCooldown(target, Math.max(privacy.cooldownUntil(target), followEnd + cooldown))).status());
         PrivacyStore restarted = new PrivacyStore(file);
-        assertFalse(restarted.available(target, 206_000 + cooldown - 1));
-        assertTrue(restarted.available(target, 206_000 + cooldown));
+        assertFalse(restarted.available(target, 221_000 + cooldown - 1));
+        assertTrue(restarted.available(target, 221_000 + cooldown));
+    }
+
+    @Test
+    void readyRequiresTheCurrentCameraTargetAndSessionAndCannotSkipNotice() {
+        ObservationSessions.Session session = sessions.begin(camera, target, 0, 180_000);
+        assertFalse(sessions.startFollowing(camera, session.token, target, 15_000, () -> true));
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        assertFalse(sessions.startFollowing(UUID.randomUUID(), session.token, target, 16_000, () -> fail()));
+        assertFalse(sessions.startFollowing(camera, UUID.randomUUID(), target, 16_000, () -> fail()));
+        assertFalse(sessions.startFollowing(camera, session.token, UUID.randomUUID(), 16_000, () -> fail()));
+        assertFalse(session.following);
+        assertTrue(sessions.startFollowing(camera, session.token, target, 16_000, () -> true));
+        assertEquals(196_000, session.followDeadline);
+    }
+
+    @Test
+    void approachExpiresAtItsExactDeadlineWithoutStartingTheFollowClock() {
+        ObservationSessions.Session session = sessions.begin(camera, target, 0, 180_000);
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        session.heartbeatAt = 29_000;
+        assertSame(session, sessions.forAction(target, session.token, 29_999));
+        assertNull(sessions.forAction(target, session.token, 30_000));
+        assertFalse(sessions.startFollowing(camera, session.token, target, 30_000, () -> fail()));
+        assertFalse(session.following);
+        assertEquals(0, session.followingStartedAt);
+    }
+
+    @Test
+    void rejectionDuringApproachAndOldReadyCannotActivateAReplacementSession() {
+        ObservationSessions.Session old = sessions.begin(camera, target, 0, 180_000);
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        sessions.end(old);
+        assertFalse(sessions.startFollowing(camera, old.token, target, 16_000, () -> fail()));
+        ObservationSessions.Session next = sessions.begin(camera, target, 20_000, 180_000);
+        assertTrue(sessions.beginApproach(camera, 35_000, () -> true));
+        assertFalse(sessions.startFollowing(camera, old.token, target, 36_000, () -> fail()));
+        assertTrue(sessions.startFollowing(camera, next.token, target, 36_000, () -> true));
+    }
+
+    @Test
+    void approachingDurationChangeReservesTheWholeRemainingEntryAndStartsOnlyWhenReady() throws IOException {
+        ObservationSessions.Session session = sessions.begin(camera, target, 0, 180_000);
+        assertTrue(sessions.beginApproach(camera, 15_000, () -> true));
+        AtomicLong reservation = new AtomicLong();
+        assertEquals(ObservationSessions.ChangeStatus.APPLIED,
+                sessions.changeDuration(camera, target, 190, 20_000, () -> true, reservation::set).status());
+        assertEquals(220_000, reservation.get());
+        assertEquals(30_000, session.approachDeadline);
+        assertEquals(0, session.followDeadline);
+        assertTrue(sessions.startFollowing(camera, session.token, target, 29_000, () -> true));
+        assertEquals(219_000, session.followDeadline);
+        assertEquals(29_000, session.followingStartedAt);
     }
 }

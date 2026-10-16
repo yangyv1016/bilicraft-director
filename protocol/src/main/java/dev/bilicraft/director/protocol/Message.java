@@ -24,7 +24,15 @@ public sealed interface Message {
     record HelloReply(int version, boolean allowed, String worldKey, String detail) implements Message {
     }
 
-    record SnapshotRequest() implements Message {
+    record SnapshotRequest(long requestId) implements Message {
+    }
+
+    record SnapshotPage(long requestId, int pageIndex, int pageCount,
+                        List<PlayerSummary> players, List<SceneView> scenes) implements Message {
+        public SnapshotPage {
+            players = List.copyOf(players);
+            scenes = List.copyOf(scenes);
+        }
     }
 
     record Snapshot(List<PlayerView> players, List<SceneView> scenes) implements Message {
@@ -41,7 +49,14 @@ public sealed interface Message {
     }
 
     record ObserveUpdate(ObserveState state, UUID targetId, long deadlineEpochMillis,
-                         int durationSeconds, String reason) implements Message {
+                         int durationSeconds, String reason, UUID sessionId, PlayerView targetPose) implements Message {
+        public ObserveUpdate(ObserveState state, UUID targetId, long deadlineEpochMillis,
+                             int durationSeconds, String reason) {
+            this(state, targetId, deadlineEpochMillis, durationSeconds, reason, null, null);
+        }
+    }
+
+    record ObserveReady(UUID sessionId, UUID targetId) implements Message {
     }
 
     record Stop() implements Message {
@@ -82,8 +97,20 @@ public sealed interface Message {
 
     enum ObserveState {
         NOTICE,
+        APPROACHING,
         FOLLOWING,
         ENDED
+    }
+
+    enum PlayerAvailability {
+        AVAILABLE,
+        OTHER_WORLD,
+        IDLE,
+        SPECTATOR,
+        UNAVAILABLE
+    }
+
+    record PlayerSummary(UUID id, String name, String world, PlayerAvailability availability) {
     }
 
     enum SceneKind {

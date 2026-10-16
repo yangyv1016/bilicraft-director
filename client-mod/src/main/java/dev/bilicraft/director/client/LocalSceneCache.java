@@ -38,9 +38,10 @@ public final class LocalSceneCache {
         if (bytes.length >= Integer.BYTES && ByteBuffer.wrap(bytes).getInt() == 0x42434149) {
             ByteBuffer.wrap(bytes).putInt(Protocol.MAGIC);
         }
-        // Wire versions 5 and 6 add other packets; their scene-only snapshot layout is unchanged.
+        // Only local v4/v5/v6 scene-only snapshots retain the unchanged legacy layout.
         if (bytes.length >= 7 && ByteBuffer.wrap(bytes).getInt() == Protocol.MAGIC
-                && (ByteBuffer.wrap(bytes).getShort(4) == 4 || ByteBuffer.wrap(bytes).getShort(4) == 5) && bytes[6] == 3) {
+                && (ByteBuffer.wrap(bytes).getShort(4) == 4 || ByteBuffer.wrap(bytes).getShort(4) == 5
+                || ByteBuffer.wrap(bytes).getShort(4) == 6) && bytes[6] == 3) {
             ByteBuffer.wrap(bytes).putShort(4, (short) Protocol.VERSION);
         }
         Message message = Codec.decode(bytes);
