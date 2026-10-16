@@ -11,6 +11,21 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ShowcaseQueueTest {
     @Test
+    void waitingForPlayerServiceDoesNotConsumeTheHeadEntry() {
+        ShowcaseQueue queue = new ShowcaseQueue(new Random(4));
+        assertNull(queue.peek());
+        queue.add(player(), 0, 180);
+        queue.add(scene("after-player"), 1, 90);
+        ShowcaseQueue.Entry waiting = queue.pending().getFirst();
+
+        assertSame(waiting, queue.peek());
+        assertSame(waiting, queue.peek());
+        assertEquals(2, queue.pending().size());
+        assertEquals(waiting, queue.poll());
+        assertEquals("after-player", queue.peek().target().name());
+    }
+
+    @Test
     void aiChoicesAppendInTheirOrderWithoutReorderingManualEntriesOrRepeatingOccupiedTargets() {
         ShowcaseQueue queue = new ShowcaseQueue(new Random(4));
         queue.start(queue.manualEntry(scene("current"), 120), 0);
@@ -150,6 +165,78 @@ class ShowcaseQueueTest {
         queue.removePlayers();
         assertNull(queue.current());
         assertEquals(1, queue.pending().size());
+    }
+
+    @Test
+    void automaticPolicyChangeRemovesOnlyAutomaticPendingEntriesAndKeepsManualDuplicatesInOrder() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget outside = scene("outside");
+        ShowcaseTarget allowed = scene("allowed");
+        queue.appendAutomatic(List.of(outside, allowed), 4, 120, 0);
+        ShowcaseQueue.Entry allowedEntry = queue.pending().getLast();
+        queue.add(outside, 0, 60);
+        ShowcaseQueue.Entry manualFirst = queue.pending().getFirst();
+        queue.add(outside, queue.pending().size(), 90);
+        ShowcaseQueue.Entry manualLast = queue.pending().getLast();
+
+        assertNull(queue.pruneAutomatic(target -> target.id().equals(allowed.id())));
+
+        assertEquals(List.of(manualFirst, allowedEntry, manualLast), queue.pending());
+        assertEquals(List.of(60, 120, 90), queue.pending().stream().map(ShowcaseQueue.Entry::durationSeconds).toList());
+    }
+
+    @Test
+    void automaticPolicyChangeEndsAnIneligibleCurrentEntryAndReturnsItForRuntimeCleanup() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        queue.appendAutomatic(List.of(scene("outside")), 4, 120, 0);
+        ShowcaseQueue.Entry automatic = queue.poll();
+        queue.start(automatic, 0);
+        queue.tickScene(10_000, false);
+        queue.add(automatic.target(), 0, 45);
+        ShowcaseQueue.Entry manualRepeat = queue.pending().getFirst();
+
+        assertEquals(automatic, queue.pruneAutomatic(target -> false));
+
+        assertNull(queue.current());
+        assertEquals(0, queue.remainingSeconds());
+        assertFalse(queue.tickScene(20_000, false));
+        assertEquals(List.of(manualRepeat), queue.pending());
+        assertNull(queue.pruneAutomatic(target -> false), "ended entries must not trigger runtime cleanup twice");
+    }
+
+    @Test
+    void automaticPolicyChangeKeepsAnEligibleCurrentEntryAndItsElapsedPlaybackTime() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        queue.appendAutomatic(List.of(scene("allowed")), 4, 120, 0);
+        ShowcaseQueue.Entry automatic = queue.poll();
+        queue.start(automatic, 0);
+        queue.tickScene(10_000, false);
+
+        assertNull(queue.pruneAutomatic(target -> true));
+
+        assertEquals(automatic, queue.current());
+        assertEquals(110, queue.remainingSeconds());
+        queue.tickScene(20_000, false);
+        assertEquals(100, queue.remainingSeconds());
+    }
+
+    @Test
+    void automaticPolicyChangeNeverTestsOrStopsExplicitManualEntries() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseQueue.Entry manual = queue.manualEntry(scene("current"), 120);
+        queue.start(manual, 0);
+        queue.tickScene(10_000, false);
+        queue.add(scene("pending"), 0, 90);
+        List<ShowcaseQueue.Entry> pending = queue.pending();
+
+        assertNull(queue.pruneAutomatic(target -> {
+            fail("manual choices must not consult the automatic patrol policy");
+            return false;
+        }));
+
+        assertEquals(manual, queue.current());
+        assertEquals(110, queue.remainingSeconds());
+        assertEquals(pending, queue.pending());
     }
 
     @Test

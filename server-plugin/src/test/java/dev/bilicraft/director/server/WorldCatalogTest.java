@@ -39,7 +39,7 @@ class WorldCatalogTest {
     @Test
     void firstWriteReloadsTheUuidSceneAndExclusionWithoutMutableLists() throws IOException {
         Path file = directory.resolve("nested/worlds.yml");
-        WorldCatalog.Profile profile = new WorldCatalog.Profile(FIRST_WORLD, "Paralon", List.of(SCENE),
+        WorldCatalog.Profile profile = new WorldCatalog.Profile(FIRST_WORLD, "Paralon", true, List.of(SCENE),
                 List.of(new SceneConfiguration.Bounds(100, 120, 30, 50)));
         WorldCatalog catalog = new WorldCatalog(file);
         catalog.put(profile);
@@ -55,17 +55,66 @@ class WorldCatalogTest {
     }
 
     @Test
-    void removingTheLastWorldLeavesAnInitializedEmptyAllowlistAcrossRestart() throws IOException {
+    void removingTheLastPatrolWorldRetainsItsSceneryAndExclusionsAcrossRestart() throws IOException {
         Path file = directory.resolve("worlds.yml");
         WorldCatalog catalog = new WorldCatalog(file);
-        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "Paralon", List.of(SCENE), List.of()));
-        catalog.remove(FIRST_WORLD);
+        List<SceneConfiguration.Bounds> exclusions = List.of(new SceneConfiguration.Bounds(100, 120, 30, 50));
+        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "Paralon", true, List.of(SCENE), exclusions));
+        catalog.setAutomaticPatrol(FIRST_WORLD, false);
 
         WorldCatalog reloaded = new WorldCatalog(file);
         assertTrue(reloaded.initialized());
-        assertTrue(reloaded.profiles().isEmpty());
-        assertNull(reloaded.get(FIRST_WORLD));
+        assertEquals(1, reloaded.profiles().size());
+        assertFalse(reloaded.get(FIRST_WORLD).automaticPatrol());
+        assertEquals(List.of(SCENE), reloaded.get(FIRST_WORLD).scenes());
+        assertEquals(exclusions, reloaded.get(FIRST_WORLD).exclusions());
         assertTrue(Files.exists(file));
+
+        reloaded.setAutomaticPatrol(FIRST_WORLD, true);
+        WorldCatalog.Profile restored = new WorldCatalog(file).get(FIRST_WORLD);
+        assertTrue(restored.automaticPatrol());
+        assertEquals(List.of(SCENE), restored.scenes());
+        assertEquals(exclusions, restored.exclusions());
+    }
+
+    @Test
+    void migratesVersionOneToPatrolEnabledWithoutLosingWorldRules() throws IOException {
+        Path file = directory.resolve("worlds.yml");
+        Files.writeString(file, """
+                version: 1
+                worlds:
+                  %s:
+                    name: Paralon
+                    scenes: []
+                    exclude-regions:
+                      - min-x: 10
+                        max-x: 20
+                        min-z: 30
+                        max-z: 40
+                """.formatted(FIRST_WORLD));
+        WorldCatalog migrated = new WorldCatalog(file);
+        assertTrue(migrated.get(FIRST_WORLD).automaticPatrol());
+        assertEquals(List.of(new SceneConfiguration.Bounds(10, 20, 30, 40)), migrated.get(FIRST_WORLD).exclusions());
+        assertTrue(Files.readString(file).contains("version: 2"));
+        assertTrue(Files.readString(file).contains("automatic-patrol: true"));
+        assertEquals(migrated.get(FIRST_WORLD), new WorldCatalog(file).get(FIRST_WORLD));
+    }
+
+    @Test
+    void versionTwoRequiresExplicitBooleanAndCompleteBoundedExclusions() throws IOException {
+        Path file = directory.resolve("worlds.yml");
+        for (String value : List.of("missing", "'true'", "12")) {
+            String source = "version: 2\nworlds:\n  " + FIRST_WORLD
+                    + ":\n    name: Paralon\n    scenes: []\n    exclude-regions: []\n"
+                    + (value.equals("missing") ? "" : "    automatic-patrol: " + value + "\n");
+            Files.writeString(file, source);
+            assertThrows(IOException.class, () -> new WorldCatalog(file));
+            assertEquals(source, Files.readString(file));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new WorldCatalog.Profile(FIRST_WORLD, "Paralon", false,
+                List.of(), java.util.Collections.nCopies(65, new SceneConfiguration.Bounds(10, 20, 30, 40))));
+        assertThrows(IllegalArgumentException.class, () -> new WorldCatalog(directory.resolve("absent.yml"))
+                .setAutomaticPatrol(FIRST_WORLD, false));
     }
 
     @Test
@@ -83,9 +132,9 @@ class WorldCatalogTest {
     void renamingAWorldKeepsItsUuidAndOtherWorldsMayReuseItsSceneId() throws IOException {
         Path file = directory.resolve("worlds.yml");
         WorldCatalog catalog = new WorldCatalog(file);
-        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "Paralon", List.of(SCENE), List.of()));
-        catalog.put(new WorldCatalog.Profile(SECOND_WORLD, "artist", List.of(SCENE), List.of()));
-        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "ParalonRenamed", List.of(SCENE), List.of()));
+        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "Paralon", true, List.of(SCENE), List.of()));
+        catalog.put(new WorldCatalog.Profile(SECOND_WORLD, "artist", true, List.of(SCENE), List.of()));
+        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "ParalonRenamed", true, List.of(SCENE), List.of()));
 
         WorldCatalog reloaded = new WorldCatalog(file);
         assertEquals(2, reloaded.profiles().size());
@@ -102,7 +151,7 @@ class WorldCatalogTest {
         for (String invalid : List.of(
                 "version: 1\nworlds: [\n",
                 "worlds: {}\n",
-                "version: 2\nworlds: {}\n",
+                "version: 3\nworlds: {}\n",
                 "version: 1\nworlds: []\n",
                 "version: 1\nworlds: {}\nextra: true\n",
                 "version: 1\nworlds:\n  invalid-uuid: {}\n")) {
@@ -167,10 +216,9 @@ class WorldCatalogTest {
     void duplicateNamePutCannotOverwriteTheExistingCatalog() throws IOException {
         Path file = directory.resolve("worlds.yml");
         WorldCatalog catalog = new WorldCatalog(file);
-        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "Paralon", List.of(SCENE), List.of()));
+        catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "Paralon", true, List.of(SCENE), List.of()));
         byte[] original = Files.readAllBytes(file);
-        assertThrows(IOException.class, () -> catalog.put(new WorldCatalog.Profile(
-                SECOND_WORLD, "Paralon", List.of(), List.of())));
+        assertThrows(IOException.class, () -> catalog.put(new WorldCatalog.Profile(SECOND_WORLD, "Paralon", true, List.of(), List.of())));
         assertArrayEquals(original, Files.readAllBytes(file));
         assertNull(catalog.get(SECOND_WORLD));
         assertEquals(1, new WorldCatalog(file).profiles().size());
@@ -180,8 +228,7 @@ class WorldCatalogTest {
     void failedMoveKeepsTheLastGoodFileAndCleansItsTemporaryFile() throws IOException {
         Path file = directory.resolve("worlds.yml");
         WorldCatalog catalog = new WorldCatalog(file);
-        WorldCatalog.Profile originalProfile = new WorldCatalog.Profile(
-                FIRST_WORLD, "Paralon", List.of(SCENE), List.of());
+        WorldCatalog.Profile originalProfile = new WorldCatalog.Profile(FIRST_WORLD, "Paralon", true, List.of(SCENE), List.of());
         catalog.put(originalProfile);
         byte[] original = Files.readAllBytes(file);
         Path lastGood = directory.resolve("last-good.yml");
@@ -189,11 +236,9 @@ class WorldCatalogTest {
         Files.createDirectory(file);
         Files.writeString(file.resolve("obstruction"), "keep");
 
-        assertThrows(IOException.class, () -> catalog.put(new WorldCatalog.Profile(
-                SECOND_WORLD, "artist", List.of(), List.of())));
+        assertThrows(IOException.class, () -> catalog.put(new WorldCatalog.Profile(SECOND_WORLD, "artist", true, List.of(), List.of())));
         assertNull(catalog.get(SECOND_WORLD));
-        assertThrows(IOException.class, () -> catalog.put(new WorldCatalog.Profile(
-                FIRST_WORLD, "renamed", List.of(), List.of())));
+        assertThrows(IOException.class, () -> catalog.put(new WorldCatalog.Profile(FIRST_WORLD, "renamed", true, List.of(), List.of())));
         assertEquals(originalProfile, catalog.get(FIRST_WORLD));
         assertArrayEquals(original, Files.readAllBytes(lastGood));
         assertEquals("keep", Files.readString(file.resolve("obstruction")));
@@ -203,10 +248,9 @@ class WorldCatalogTest {
     }
 
     @Test
-    void failedRemoveRestoresTheOriginalProfileInMemoryAndLeavesTheLastGoodFile() throws IOException {
+    void failedPatrolRemovalRestoresTheOriginalProfileInMemoryAndLeavesTheLastGoodFile() throws IOException {
         Path file = directory.resolve("worlds.yml");
-        WorldCatalog.Profile profile = new WorldCatalog.Profile(
-                FIRST_WORLD, "Paralon", List.of(SCENE), List.of());
+        WorldCatalog.Profile profile = new WorldCatalog.Profile(FIRST_WORLD, "Paralon", true, List.of(SCENE), List.of());
         WorldCatalog catalog = new WorldCatalog(file);
         catalog.put(profile);
         byte[] original = Files.readAllBytes(file);
@@ -215,7 +259,7 @@ class WorldCatalogTest {
         Files.createDirectory(file);
         Files.writeString(file.resolve("obstruction"), "keep");
 
-        assertThrows(IOException.class, () -> catalog.remove(FIRST_WORLD));
+        assertThrows(IOException.class, () -> catalog.setAutomaticPatrol(FIRST_WORLD, false));
         assertEquals(profile, catalog.get(FIRST_WORLD));
         assertEquals(List.of(profile), List.copyOf(catalog.profiles()));
         assertArrayEquals(original, Files.readAllBytes(lastGood));

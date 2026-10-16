@@ -18,7 +18,7 @@ const minecraft = require('minecraft-protocol');
 const ChatMessage = require('prismarine-chat')('1.21.11');
 const CHANNEL = 'bilicraftdirector:director';
 const MAGIC = 0x42434452;
-const VERSION = 4;
+const VERSION = 5;
 const MAX_PACKET_BYTES = 30_000;
 const port = Number(process.env.SMOKE_PORT ?? 25590);
 assert(Number.isInteger(port) && port > 1023 && port <= 65535, 'Invalid SMOKE_PORT');
@@ -97,6 +97,17 @@ function decode(buffer) {
     assert(Number.isSafeInteger(value), 'Timestamp exceeds JS safe integer range');
     return value;
   }
+  function regions() {
+    const count = read(2, 'readUInt16BE');
+    assert(count <= 64, 'Too many exclusion regions');
+    const exclusions = [];
+    for (let index = 0; index < count; index++) {
+      const region = { minX: read(8, 'readDoubleBE'), minZ: read(8, 'readDoubleBE'), maxX: read(8, 'readDoubleBE'), maxZ: read(8, 'readDoubleBE') };
+      assert(Object.values(region).every(Number.isFinite) && region.minX <= region.maxX && region.minZ <= region.maxZ);
+      exclusions.push(region);
+    }
+    return exclusions;
+  }
   assert.equal(read(4, 'readUInt32BE'), MAGIC);
   assert.equal(read(2, 'readUInt16BE'), VERSION);
   const type = read(1, 'readUInt8');
@@ -167,20 +178,17 @@ function decode(buffer) {
     const requestId = timestamp();
     assert(requestId > 0, 'Invalid map request ID');
     const worldKey = text(256), configured = boolean(), baseUrl = text(1024), dynmapWorld = text(256);
-    const count = read(2, 'readUInt16BE');
-    assert(count <= 64, 'Too many map exclusions');
-    const exclusions = [];
-    for (let index = 0; index < count; index++) {
-      const region = { minX: read(8, 'readDoubleBE'), minZ: read(8, 'readDoubleBE'), maxX: read(8, 'readDoubleBE'), maxZ: read(8, 'readDoubleBE') };
-      assert(Object.values(region).every(Number.isFinite) && region.minX <= region.maxX && region.minZ <= region.maxZ);
-      exclusions.push(region);
-    }
+    const exclusions = regions();
     if (configured) {
       const url = new URL(baseUrl);
       assert(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash);
       assert(dynmapWorld.trim().length > 0);
-    } else assert(!baseUrl && !dynmapWorld && count === 0, 'Unconfigured source carried data');
+    } else assert(!baseUrl && !dynmapWorld && exclusions.length === 0, 'Unconfigured source carried data');
     message = { type, requestId, worldKey, configured, baseUrl, dynmapWorld, exclusions, detail: text(512) };
+  } else if (type === 13) {
+    const worldKey = text(256), worldId = uuid(), automaticPatrol = boolean();
+    assert(worldKey.trim().length > 0 && !/[\u0000-\u001f\u007f-\u009f]/.test(worldKey), 'Invalid world policy identity');
+    message = { type, worldKey, worldId, automaticPatrol, exclusions: regions() };
   } else {
     throw new Error(`Unexpected server message type ${type}`);
   }

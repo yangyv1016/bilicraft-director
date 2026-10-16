@@ -72,6 +72,13 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private String aiTestStatus = "尚未测试；模型列表不代表Chat能力已验证";
     private final LocalSceneCache sceneCache = new LocalSceneCache(FabricLoader.getInstance().getConfigDir()
             .resolve("bilicraft-director-scenes"));
+    private final LocalWorldPolicyCache worldPolicyCache = new LocalWorldPolicyCache(FabricLoader.getInstance().getConfigDir()
+            .resolve("bilicraft-director-world-policies"));
+    private Message.WorldPolicy worldPolicy;
+    private boolean worldPolicyCacheFailed;
+    private boolean worldPolicyReceived;
+    private boolean worldPolicyPending;
+    private long worldPolicyDeadline;
     private LocalControlServer localControlServer;
     private final AccountAvatar accountAvatar = new AccountAvatar();
     private final DynmapMapClient mapClient = new DynmapMapClient();
@@ -198,7 +205,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             sceneCacheLimited = false;
             currentWorldKey = client.world == null ? null : client.world.getRegistryKey().getValue().toString();
             lastServer = client.getCurrentServerEntry();
-            if (currentWorldKey != null) loadLocalMapSettings();
+            if (currentWorldKey != null) {
+                loadLocalMapSettings();
+                loadWorldPolicy();
+            }
             try {
                 cachedScenes = sceneCache.load(lastServer == null ? "singleplayer" : lastServer.address);
                 status = "可手动启动本地导播；等待导播服务授权";
@@ -290,7 +300,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (switchDirection > 0) {
                 skipQueue();
             } else {
-                requestSnapshot(-1);
+                switchTarget(-1);
             }
         }
         long now = System.currentTimeMillis();
@@ -320,8 +330,15 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             start();
         }
         if (now - lastHeartbeat >= 2_000 && ClientPlayNetworking.canSend(DirectorPayload.ID)) {
+            if (!worldPolicyReceived && lastHeartbeat == 0) {
+                worldPolicyPending = true;
+                worldPolicyDeadline = now + 8_000;
+            }
             send(allowed ? new Message.Heartbeat() : new Message.Hello(Protocol.VERSION));
             lastHeartbeat = now;
+        }
+        if (worldPolicyPending && now >= worldPolicyDeadline) {
+            worldPolicyPending = false;
         }
         if (allowed && now - lastMessage > 8_000) {
             revokeServerAccess("导播服务响应超时");
@@ -361,6 +378,31 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     requestMapSource(false);
                 }
             }
+        } else if (message instanceof Message.WorldPolicy policy) {
+            if (!policy.worldKey().equals(currentWorldKey)) {
+                return;
+            }
+            boolean changed = !policy.equals(worldPolicy);
+            boolean wasPending = worldPolicyPending;
+            worldPolicyReceived = true;
+            worldPolicyPending = false;
+            if (!changed && !worldPolicyCacheFailed) {
+                return;
+            }
+            worldPolicy = policy;
+            worldPolicyCacheFailed = false;
+            try {
+                worldPolicyCache.save(lastServer == null ? "singleplayer" : lastServer.address, policy);
+            } catch (IOException exception) {
+                worldPolicyCacheFailed = true;
+                LOGGER.warn("Cannot save world patrol policy", exception);
+            }
+            if (changed) invalidateAiDecision();
+            pruneAutomaticQueue(client);
+            if (changed || wasPending) {
+                status = policy.automaticPatrol() ? "当前世界已加入自动巡游范围"
+                        : "当前世界不自动巡游或补点；仍可手动选择并加入目标";
+            }
         } else if (message instanceof Message.Snapshot snapshot) {
             if (!snapshotPending) {
                 return;
@@ -391,7 +433,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             }
         } else if (message instanceof Message.MapSource source) {
             if (!mapMetadataPending || source.requestId() != mapMetadataRequestId || !allowed
-                    || businessRequestCancelled || !source.worldKey().equals(currentWorldKey)) {
+                    || !source.worldKey().equals(currentWorldKey)) {
                 return;
             }
             boolean refresh = mapRefreshRequested;
@@ -530,6 +572,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         localMapProfile = new LocalMapSettings.Profile("", "");
         mapSource = null;
         serverMapSource = null;
+        worldPolicy = null;
+        worldPolicyCacheFailed = false;
+        worldPolicyReceived = false;
+        worldPolicyPending = false;
         serverScenes = List.of();
         importedScenes = List.of();
         mapLoaded = false;
@@ -540,6 +586,36 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         mapFetchedAt = 0;
         mapSceneCount = 0;
         mapDetail = "可配置本机地图外链，无需导播服务";
+    }
+
+    private void loadWorldPolicy() {
+        worldPolicyPending = ClientPlayNetworking.canSend(DirectorPayload.ID);
+        worldPolicyDeadline = System.currentTimeMillis() + 8_000;
+        try {
+            worldPolicy = worldPolicyCache.load(lastServer == null ? "singleplayer" : lastServer.address, currentWorldKey);
+            worldPolicyCacheFailed = false;
+        } catch (IOException exception) {
+            worldPolicyCacheFailed = true;
+            LOGGER.warn("Cannot read world patrol policy", exception);
+        }
+    }
+
+    private boolean automaticPatrolAllowed() {
+        return !worldPolicyPending && (worldPolicy != null ? worldPolicy.automaticPatrol() : !worldPolicyCacheFailed);
+    }
+
+    private boolean automaticTargetAvailable(ShowcaseTarget target) {
+        return automaticPatrolAllowed() && targetAvailable(target);
+    }
+
+    private List<Message.RegionBounds> worldExclusions() {
+        return worldPolicy != null ? worldPolicy.exclusions()
+                : serverMapSource == null ? List.of() : serverMapSource.exclusions();
+    }
+
+    private boolean insideExcludedRegion(Vec3d position) {
+        return worldExclusions().stream().anyMatch(region -> position.x >= region.minX() && position.x <= region.maxX()
+                && position.z >= region.minZ() && position.z <= region.maxZ());
     }
 
     private void loadLocalMapSettings() {
@@ -562,7 +638,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             mapDetail = "请先连接游戏并进入观察者模式";
             return false;
         }
-        if (refresh && localMapProfile.configured()) {
+        if (refresh && mapSource != null && mapSource.configured() && (localMapProfile.configured() || !allowed)) {
             if (mapExternalPending) {
                 mapDetail = "地图外链正在拉取，请等待本次完成";
                 return false;
@@ -570,7 +646,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             pullMapExternal(client, mapSource);
             return true;
         }
-        if (!allowed || businessRequestCancelled) {
+        if (!allowed) {
             mapDetail = "请先配置本机地图外链；服务端来源需要导播服务授权";
             return false;
         }
@@ -598,7 +674,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private void pullMapExternal(MinecraftClient client, Message.MapSource source) {
         long generation = ++mapGeneration;
         String serverAddress = lastServer == null ? "singleplayer" : lastServer.address;
-        boolean localSource = localMapProfile.configured();
         mapLoading = true;
         mapExternalPending = true;
         mapRequestDeadline = System.currentTimeMillis() + 30_000;
@@ -608,7 +683,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (allowed && System.currentTimeMillis() - lastMessage > 8_000) {
                 revokeServerAccess("导播服务响应超时");
             }
-            if (generation != mapGeneration || (!localSource && (!allowed || businessRequestCancelled))
+            if (generation != mapGeneration
                     || !serverAddress.equals(lastServer == null ? "singleplayer" : lastServer.address)
                     || !source.worldKey().equals(currentWorldKey)) {
                 return;
@@ -654,14 +729,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void revokeServerAccess(String reason) {
-        if (!localMapProfile.configured()) mapGeneration++;
         mapMetadataPending = false;
         mapRefreshRequested = false;
-        if (!localMapProfile.configured()) {
-            mapLoading = false;
-            mapExternalPending = false;
-            mapDetail = "导播服务失联，可配置本机地图外链并继续使用观景缓存";
-        }
+        mapLoading = mapExternalPending;
+        if (!mapExternalPending) mapDetail = "导播服务失联；已取得的外链、观景缓存与世界规则仍可使用";
         if (requestedTarget != null || (observeRequestTarget != null && !businessRequestCancelled)) {
             send(new Message.Stop());
         }
@@ -710,7 +781,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         boolean remoteAllowed = allowed && !businessRequestCancelled && now - lastMessage <= 8_000;
         ArrayList<StrategyPrompt.Candidate> candidates = new ArrayList<>();
         for (ShowcaseTarget target : targets) {
-            if ((target instanceof ShowcaseTarget.Player && !remoteAllowed) || !targetAvailable(target)
+            if ((target instanceof ShowcaseTarget.Player && !remoteAllowed) || !automaticTargetAvailable(target)
                     || !showcaseQueue.automaticCandidateAvailable(target.id(), now)) {
                 continue;
             }
@@ -729,7 +800,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
 
     /** Returns true while AI owns this fill attempt; all failures/cooldowns use the existing local queue policy. */
     private boolean tickAiDecision(MinecraftClient client, long now, boolean paused) {
-        if (!aiSettings.enabled || !aiSettings.profiles.get(aiSettings.selected).complete()) {
+        if (!automaticPatrolAllowed() || !aiSettings.enabled || !aiSettings.profiles.get(aiSettings.selected).complete()) {
             return false;
         }
         if (aiSession.pending()) {
@@ -755,7 +826,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (!aiSession.finish(request, completion)) {
                 return;
             }
-            if (!running || !canOperate(client) || !queueSettings.autoFill || !aiSettings.enabled
+            if (!running || !canOperate(client) || !automaticPatrolAllowed() || !queueSettings.autoFill || !aiSettings.enabled
                     || request.generation() != aiGeneration || request.settingsRevision() != aiSettings.revision
                     || request.provider() != aiSettings.selected || !request.world().equals(currentWorldKey)) {
                 aiSession.status = "旧AI结果已失效；不会启动或改写队列";
@@ -770,7 +841,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 ArrayList<ShowcaseTarget> choices = new ArrayList<>();
                 for (String id : picks) {
                     ShowcaseTarget target = targets.stream().filter(item -> item.id().equals(id)).findFirst().orElse(null);
-                    if (target != null && targetAvailable(target)
+                    if (target != null && automaticTargetAvailable(target)
                             && (!(target instanceof ShowcaseTarget.Player) || System.currentTimeMillis() - lastMessage <= 8_000)) {
                         choices.add(target);
                     }
@@ -820,7 +891,28 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         return true;
     }
 
+    private void pruneAutomaticQueue(MinecraftClient client) {
+        if (!automaticPatrolAllowed()) {
+            ShowcaseQueue.Entry removed = showcaseQueue.pruneAutomatic(target -> false);
+            if (removed != null) {
+                if (requestedTarget != null) {
+                    send(new Message.Stop());
+                    businessRequestCancelled = hasBusinessRequest();
+                    endObservation("当前世界已移出自动巡游范围");
+                }
+                activeScene = null;
+                sceneArrival = null;
+                retreatUntil = 0;
+                fadeStarted = 0;
+                stopMotion();
+                resetOrbit(client.player);
+                status = "当前世界不自动巡游或补点；手动待播项继续播放";
+            }
+        }
+    }
+
     private void tickQueue(MinecraftClient client, long now) {
+        pruneAutomaticQueue(client);
         ShowcaseQueue.Entry current = showcaseQueue.current();
         boolean paused = client.currentScreen != null || client.isPaused();
         if (current != null && current.target() instanceof ShowcaseTarget.Scene) {
@@ -838,7 +930,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     status = "已请求本人传送，等待到达并加载场景";
                 }
                 if (sceneArrival.arrived(new CameraMotion.Point(client.player.getX(), client.player.getY(),
-                        client.player.getZ()), sceneChunksLoaded(client, activeScene))) {
+                        client.player.getZ()), sceneChunksLoaded(client, sceneArrival.destination()))) {
                     sceneArrival = null;
                     cameraMotion.reset();
                     fadeStarted = now - 250;
@@ -862,27 +954,36 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         } else if (current != null && requestedTarget == null) {
             showcaseQueue.finishCurrent();
         }
-        if (queueSettings.autoFill && showcaseQueue.pending().size() < queueSettings.bufferSize) {
+        if (automaticPatrolAllowed() && queueSettings.autoFill && showcaseQueue.pending().size() < queueSettings.bufferSize) {
             if (!tickAiDecision(client, now, paused)) {
-                showcaseQueue.fill(targets.stream().filter(this::targetAvailable).toList(), queueSettings.bufferSize,
+                showcaseQueue.fill(targets.stream().filter(this::automaticTargetAvailable).toList(), queueSettings.bufferSize,
                         queueSettings.sceneDurationSeconds, now);
             }
         }
-        if (queueSettings.autoFill && showcaseQueue.pending().size() < queueSettings.bufferSize
+        if (automaticPatrolAllowed() && queueSettings.autoFill && showcaseQueue.pending().size() < queueSettings.bufferSize
                 && allowed && !businessRequestCancelled && !hasBusinessRequest()
                 && !paused && now - lastQueueRefreshAttempt >= 60_000) {
             lastQueueRefreshAttempt = now;
             requestSnapshot(0);
         }
-        if (showcaseQueue.current() != null || paused || now < retreatUntil
-                || (hasBusinessRequest() && !businessRequestCancelled)) {
+        if (showcaseQueue.current() != null || paused || now < retreatUntil) {
             return;
         }
         ShowcaseQueue.Entry next;
-        while ((next = showcaseQueue.poll()) != null) {
+        while ((next = showcaseQueue.peek()) != null) {
+            if (next.target() instanceof ShowcaseTarget.Player
+                    && (hasBusinessRequest() || !allowed || businessRequestCancelled)) {
+                if (!allowed && now - lastMessage > 8_000) {
+                    revokeServerAccess("玩家数据重新同步超时");
+                    continue;
+                }
+                return;
+            }
+            showcaseQueue.poll();
             String targetId = next.target().id();
             ShowcaseTarget latest = targets.stream().filter(target -> target.id().equals(targetId)).findFirst().orElse(null);
-            if (latest == null || !targetAvailable(latest)) {
+            if (latest == null || !targetAvailable(latest)
+                    || (next.source() == ShowcaseQueue.Source.AUTO && !automaticTargetAvailable(latest))) {
                 showcaseQueue.suppress(next.target().id(), now + 30_000);
                 continue;
             }
@@ -939,6 +1040,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         lastQueueRefreshAttempt = 0;
         currentWorldKey = worldKey;
         loadLocalMapSettings();
+        loadWorldPolicy();
         serverScenes = cachedScenes.stream().filter(scene -> scene.world().equals(worldKey)
                 && !scene.id().startsWith("dynmap:")).toList();
         allowed = false;
@@ -1108,8 +1210,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "请先启动导播";
             return false;
         }
-        if (hasBusinessRequest()
-                && (!businessRequestCancelled || target instanceof ShowcaseTarget.Player)) {
+        if (target instanceof ShowcaseTarget.Player && hasBusinessRequest()) {
             status = "导播请求处理中，请稍后再展示";
             return false;
         }
@@ -1144,12 +1245,13 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "正在请求玩家展示预告";
         } else if (target instanceof ShowcaseTarget.Scene scene) {
             activeScene = scene.view();
-            double radius = Math.min(activeScene.radius(), settings.radius);
-            Vec3d center = new Vec3d(activeScene.x(), activeScene.y(), activeScene.z());
-            sceneArrival = client.player.getEntityPos().distanceTo(center) + radius > 96
-                    || !sceneChunksLoaded(client, activeScene)
-                    ? new SceneArrival(new CameraMotion.Point(activeScene.x() + radius,
-                    activeScene.y() + settings.heightOffset, activeScene.z()), System.currentTimeMillis()) : null;
+            double radius = settings.radius;
+            Vec3d destinationPosition = new Vec3d(activeScene.x() + radius, settings.heightY, activeScene.z());
+            CameraMotion.Point destination = new CameraMotion.Point(destinationPosition.x,
+                    destinationPosition.y, destinationPosition.z);
+            sceneArrival = client.player.getEntityPos().distanceTo(destinationPosition) > 96
+                    || !sceneChunksLoaded(client, destination)
+                    ? new SceneArrival(destination, System.currentTimeMillis()) : null;
             cameraMotion.reset();
             retreatUntil = 0;
             stopMotion();
@@ -1172,38 +1274,27 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     && entity != null && entity.squaredDistanceTo(client.player) <= 96 * 96;
         }
         SceneView scene = ((ShowcaseTarget.Scene) target).view();
-        if (serverMapSource != null && serverMapSource.worldKey().equals(currentWorldKey)
-                && serverMapSource.exclusions().stream().anyMatch(region -> scene.x() + scene.radius() >= region.minX()
-                && scene.x() - scene.radius() <= region.maxX() && scene.z() + scene.radius() >= region.minZ()
-                && scene.z() - scene.radius() <= region.maxZ())) {
+        double radius = Math.max(scene.radius(), settings.radius);
+        if (worldExclusions().stream().anyMatch(region -> scene.x() + radius >= region.minX()
+                && scene.x() - radius <= region.maxX() && scene.z() + radius >= region.minZ()
+                && scene.z() - radius <= region.maxZ())) {
             return false;
         }
         double verticalSwing = settings.mode == CameraMotion.Mode.CRANE ? settings.motionAmplitude / 4 : 0;
         if (!scene.world().equals(client.world.getRegistryKey().getValue().toString())
                 || scene.y() < client.world.getBottomY()
-                || scene.y() + settings.heightOffset - verticalSwing < client.world.getBottomY()
-                || scene.y() + settings.heightOffset + verticalSwing > client.world.getTopYInclusive()
-                || !client.world.getWorldBorder().contains(scene.x() - scene.radius(), scene.z() - scene.radius())
-                || !client.world.getWorldBorder().contains(scene.x() + scene.radius(), scene.z() + scene.radius())) {
+                || settings.heightY - verticalSwing < client.world.getBottomY()
+                || settings.heightY + verticalSwing > client.world.getTopYInclusive()
+                || !client.world.getWorldBorder().contains(scene.x() - radius, scene.z() - radius)
+                || !client.world.getWorldBorder().contains(scene.x() + radius, scene.z() + radius)) {
             return false;
         }
         return true;
     }
 
-    private boolean sceneChunksLoaded(MinecraftClient client, SceneView scene) {
-        double radius = Math.min(scene.radius(), settings.radius);
-        int minX = MathHelper.floor(scene.x() - radius) >> 4;
-        int maxX = MathHelper.floor(scene.x() + radius) >> 4;
-        int minZ = MathHelper.floor(scene.z() - radius) >> 4;
-        int maxZ = MathHelper.floor(scene.z() + radius) >> 4;
-        for (int x = minX; x <= maxX; x++) {
-            for (int z = minZ; z <= maxZ; z++) {
-                if (!client.world.getChunkManager().isChunkLoaded(x, z)) {
-                    return false;
-                }
-            }
-        }
-        return true;
+    private boolean sceneChunksLoaded(MinecraftClient client, CameraMotion.Point position) {
+        return client.world.getChunkManager().isChunkLoaded(MathHelper.floor(position.x()) >> 4,
+                MathHelper.floor(position.z()) >> 4);
     }
 
     private void endObservation(String reason) {
@@ -1245,7 +1336,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
 
     private void resetOrbit(ClientPlayerEntity player) {
         Vec3d direction = new Vec3d(player.getRotationVec(1).x, 0, player.getRotationVec(1).z).normalize();
-        orbitCenter = player.getEntityPos().add(direction.multiply(settings.radius)).add(0, -settings.heightOffset, 0);
+        orbitCenter = player.getEntityPos().add(direction.multiply(settings.radius));
         cameraMotion.reset();
     }
 
@@ -1267,6 +1358,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             player.setVelocity(Vec3d.ZERO);
             return;
         }
+        if (!automaticPatrolAllowed()
+                && (showcaseQueue.current() == null || showcaseQueue.current().source() == ShowcaseQueue.Source.AUTO)) {
+            stopMotion();
+            status = "当前世界不自动巡游；请选择目标或手动加入待播队列";
+            return;
+        }
         long now = System.currentTimeMillis();
         if (requestedTarget != null && now >= observeDeadline) {
             send(new Message.Stop());
@@ -1277,7 +1374,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             Vec3d nextPosition = player.getEntityPos().add(velocity);
             if (!client.world.getChunkManager().isChunkLoaded(MathHelper.floor(nextPosition.x) >> 4,
                     MathHelper.floor(nextPosition.z) >> 4) || !client.world.getWorldBorder().contains(nextPosition)
-                    || nextPosition.y < client.world.getBottomY() || nextPosition.y > client.world.getTopYInclusive()) {
+                    || nextPosition.y < client.world.getBottomY() || nextPosition.y > client.world.getTopYInclusive()
+                    || insideExcludedRegion(nextPosition)) {
                 retreatUntil = 0;
                 stopMotion();
                 resetOrbit(player);
@@ -1294,9 +1392,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         CameraMotion.Subject subject;
         if (observeState == ObserveState.FOLLOWING && requestedTarget != null) {
             PlayerEntity target = client.world.getPlayerByUuid(requestedTarget);
-            if (target == null || target.squaredDistanceTo(player) > 96 * 96) {
+            if (target == null || target.squaredDistanceTo(player) > 96 * 96
+                    || insideExcludedRegion(target.getEntityPos())) {
                 send(new Message.Stop());
-                endObservation("玩家已离开当前加载范围");
+                endObservation("玩家已离开可跟随范围或进入排除区");
                 return;
             }
             Vec3d center = target.getEntityPos().add(0, 1.2, 0);
@@ -1327,17 +1426,17 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 new CameraMotion.Point(player.getX(), player.getY(), player.getZ()), settings);
         Vec3d desired = new Vec3d(shot.position().x(), shot.position().y(), shot.position().z());
         Vec3d lookAt = new Vec3d(shot.lookAt().x(), shot.lookAt().y(), shot.lookAt().z());
-        if (!client.world.getChunkManager().isChunkLoaded(MathHelper.floor(desired.x) >> 4, MathHelper.floor(desired.z) >> 4)
-                || !client.world.getWorldBorder().contains(desired)
-                || desired.y < client.world.getBottomY() || desired.y > client.world.getTopYInclusive()) {
+        if (!client.world.getWorldBorder().contains(desired)
+                || desired.y < client.world.getBottomY() || desired.y > client.world.getTopYInclusive()
+                || insideExcludedRegion(desired)) {
             if (requestedTarget != null) {
                 send(new Message.Stop());
-                endObservation("跟随机位区块未加载");
+                endObservation("跟随机位超出世界边界、高度或进入排除区");
             }
             activeScene = null;
             stopMotion();
             resetOrbit(player);
-            status = "下一机位区块未加载或超出世界边界，已回到本地环绕";
+            status = "下一机位超出世界边界、高度或进入排除区，已暂缓移动";
             return;
         }
         Vec3d delta = desired.subtract(player.getEntityPos());
@@ -1348,17 +1447,23 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
         Vec3d nextVelocity = player.getVelocity().lerp(wantedVelocity, 0.18);
         Vec3d nextPosition = player.getEntityPos().add(nextVelocity);
-        if (!client.world.getChunkManager().isChunkLoaded(MathHelper.floor(nextPosition.x) >> 4, MathHelper.floor(nextPosition.z) >> 4)
-                || !client.world.getWorldBorder().contains(nextPosition)
-                || nextPosition.y < client.world.getBottomY() || nextPosition.y > client.world.getTopYInclusive()) {
+        if (!client.world.getWorldBorder().contains(nextPosition)
+                || nextPosition.y < client.world.getBottomY() || nextPosition.y > client.world.getTopYInclusive()
+                || insideExcludedRegion(nextPosition)) {
             if (requestedTarget != null) {
                 send(new Message.Stop());
-                endObservation("前方区块未加载或到达世界边界");
+                endObservation("前方机位到达世界边界、高度限制或排除区");
             }
             activeScene = null;
             stopMotion();
             resetOrbit(player);
-            status = "前方区块未加载或到达世界边界，已暂缓移动";
+            status = "前方机位到达世界边界、高度限制或排除区，已暂缓移动";
+            return;
+        }
+        if (!client.world.getChunkManager().isChunkLoaded(MathHelper.floor(nextPosition.x) >> 4,
+                MathHelper.floor(nextPosition.z) >> 4)) {
+            stopMotion();
+            status = "等待前方机位区块加载";
             return;
         }
         player.setVelocity(nextVelocity);
@@ -1380,6 +1485,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
 
     String status() {
         String detail = businessRequestCancelled ? "旧远程请求待排空，仅本地导播；远程恢复可重连；" + status : status;
+        detail = worldPolicyCacheFailed ? "世界规则缓存读写失败，见日志；" + detail : detail;
         detail = sceneCacheLimited ? "缓存限64项/30KB，当前世界优先；" + detail : detail;
         return sceneCacheFailed ? "观景缓存读写失败，见日志；" + detail : detail;
     }
@@ -1446,6 +1552,13 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         state.addProperty("spectator", client.player != null && client.player.isSpectator());
         state.addProperty("status", status());
         state.addProperty("world", worldKey);
+        JsonObject patrol = new JsonObject();
+        patrol.addProperty("known", worldPolicy != null);
+        patrol.addProperty("automatic", automaticPatrolAllowed());
+        patrol.addProperty("pending", worldPolicyPending);
+        patrol.addProperty("cacheFailed", worldPolicyCacheFailed);
+        patrol.addProperty("source", worldPolicy == null ? "LOCAL_DEFAULT" : "SERVER");
+        state.add("patrol", patrol);
         ServerInfo server = client.getCurrentServerEntry();
         state.addProperty("server", connected ? server == null ? "singleplayer" : server.address : "");
         JsonObject account = new JsonObject();
@@ -1467,7 +1580,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             state.add("camera", JsonNull.INSTANCE);
         }
         state.addProperty("motionPaused", running && (client.currentScreen != null || client.isPaused()
-                || observeState == ObserveState.NOTICE || sceneArrival != null || !canOperate(client)));
+                || observeState == ObserveState.NOTICE || sceneArrival != null || !canOperate(client)
+                || (!automaticPatrolAllowed() && (showcaseQueue.current() == null
+                || showcaseQueue.current().source() == ShowcaseQueue.Source.AUTO))));
         state.addProperty("sceneArriving", sceneArrival != null);
         JsonObject observation = new JsonObject();
         observation.addProperty("state", remoteAllowed ? observeState.name() : ObserveState.ENDED.name());
@@ -1478,7 +1593,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         motion.addProperty("radius", settings.radius);
         motion.addProperty("speed", settings.speed);
         motion.addProperty("mode", settings.mode.name());
-        motion.addProperty("heightOffset", settings.heightOffset);
+        motion.addProperty("heightY", settings.heightY);
+        motion.addProperty("playerHeightOffset", settings.playerHeightOffset);
         motion.addProperty("motionAmplitude", settings.motionAmplitude);
         motion.addProperty("turnRateDegreesPerSecond", settings.turnRateDegreesPerSecond);
         state.add("settings", motion);
@@ -1547,6 +1663,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             fields.addProperty("label", target.label());
             fields.addProperty("world", targetWorld);
             fields.addProperty("available", targetAvailable(target));
+            fields.addProperty("automaticAvailable", automaticTargetAvailable(target));
             availableTargets.add(fields);
         }
         state.add("targets", availableTargets);
@@ -1570,9 +1687,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         state.addProperty("cameraSettingsSaved", cameraSettingsSaved);
         int pendingCount = showcaseQueue.pending().size();
         String queueStatus = (!running ? "导播已停止；" : "")
-                + (queueSettings.autoFill ? "自动补充已启用" : "自动补充已关闭") + "；待播 "
+                + (worldPolicyPending ? "正在同步巡游范围" : !automaticPatrolAllowed() ? "当前世界仅手动选点"
+                : queueSettings.autoFill ? "自动补充已启用" : "自动补充已关闭") + "；待播 "
                 + pendingCount + "/" + queueSettings.bufferSize
-                + (pendingCount < queueSettings.bufferSize ? "，合法候选不足时保持基础巡游" : "");
+                + (!automaticPatrolAllowed() ? "，自动巡游与AI补点暂停"
+                : pendingCount < queueSettings.bufferSize ? "，合法候选不足时保持基础巡游" : "");
         queue.addProperty("status", queueSettings.loadFailed ? "队列配置读取失败，当前使用默认值；" + queueStatus : queueStatus);
         state.add("queue", queue);
         StrategyPrompt.PreparedDecision prepared = prepareAiDecision(System.currentTimeMillis());
@@ -1586,15 +1705,14 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         state.add("aiDecisionPreview", preview);
         JsonObject capabilities = new JsonObject();
         JsonObject map = new JsonObject();
-        boolean configuredMap = mapSource != null && mapSource.configured()
-                && (localMapProfile.configured() || remoteAllowed);
+        boolean configuredMap = mapSource != null && mapSource.configured();
         map.addProperty("supported", canOperate(client));
         map.addProperty("configured", configuredMap);
         map.addProperty("localConfigured", localMapProfile.configured());
         map.addProperty("localBaseUrl", localMapProfile.baseUrl());
         map.addProperty("localDynmapWorld", localMapProfile.dynmapWorld());
         map.addProperty("source", localMapProfile.configured() ? "LOCAL"
-                : remoteAllowed && mapSource != null && mapSource.configured() ? "SERVER" : "NONE");
+                : configuredMap ? "SERVER" : "NONE");
         map.addProperty("loading", mapLoading);
         map.addProperty("sceneCount", mapSceneCount);
         map.addProperty("fetchedAt", mapFetchedAt);
@@ -1650,7 +1768,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 case "queueMove" -> Set.of("action", "entryId", "index", "delta");
                 case "queueAdjust" -> Set.of("action", "entryId", "deltaSeconds");
                 case "queueSettings" -> Set.of("action", "autoFill", "bufferSize", "sceneDurationSeconds");
-                case "camera" -> Set.of("action", "radius", "speed", "mode", "heightOffset", "motionAmplitude",
+                case "camera" -> Set.of("action", "radius", "speed", "mode", "heightY", "playerHeightOffset", "motionAmplitude",
                         "turnRateDegreesPerSecond", "persist");
                 case "ai" -> Set.of("action", "provider", "baseUrl", "model", "apiKey", "clearKey", "enabled");
                 case "aiTest" -> Set.of("action");
@@ -1675,7 +1793,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                         status = "请先启动导播并关闭游戏菜单";
                         yield false;
                     }
-                    yield requestSnapshot(-1);
+                    yield switchTarget(-1);
                 }
                 case "next", "queueSkip" -> skipQueue();
                 case "refresh" -> requestSnapshot(0);
@@ -1824,14 +1942,16 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     CameraMotion.Mode mode = CameraMotion.Mode.valueOf(commandString(command, "mode", 16));
                     double radius = commandNumber(command, "radius");
                     double speed = commandNumber(command, "speed");
-                    double height = commandNumber(command, "heightOffset");
+                    double heightY = commandNumber(command, "heightY");
+                    double playerHeightOffset = commandNumber(command, "playerHeightOffset");
                     double amplitude = commandNumber(command, "motionAmplitude");
                     double turnRate = commandNumber(command, "turnRateDegreesPerSecond");
-                    CameraSettings.validate(mode, radius, speed, height, amplitude, turnRate);
+                    CameraSettings.validate(mode, radius, speed, heightY, playerHeightOffset, amplitude, turnRate);
                     settings.mode = mode;
                     settings.radius = radius;
                     settings.speed = speed;
-                    settings.heightOffset = height;
+                    settings.heightY = heightY;
+                    settings.playerHeightOffset = playerHeightOffset;
                     settings.motionAmplitude = amplitude;
                     settings.turnRateDegreesPerSecond = turnRate;
                     cameraSettingsSaved = false;

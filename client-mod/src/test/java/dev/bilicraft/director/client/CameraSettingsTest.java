@@ -53,7 +53,8 @@ class CameraSettingsTest {
         assertEquals(16, settings.radius);
         assertEquals(3.5, settings.speed);
         assertEquals(CameraMotion.Mode.AUTO, settings.mode);
-        assertEquals(4, settings.heightOffset);
+        assertEquals(80, settings.heightY);
+        assertEquals(4, settings.playerHeightOffset);
         assertEquals(8, settings.motionAmplitude);
         assertEquals(30, settings.turnRateDegreesPerSecond);
     }
@@ -65,7 +66,8 @@ class CameraSettingsTest {
         saved.mode = CameraMotion.Mode.CRANE;
         saved.radius = 18;
         saved.speed = 4;
-        saved.heightOffset = 7;
+        saved.heightY = 120;
+        saved.playerHeightOffset = 7;
         saved.motionAmplitude = 10;
         saved.turnRateDegreesPerSecond = 24;
         assertTrue(saved.save(LoggerFactory.getLogger(getClass())));
@@ -74,7 +76,8 @@ class CameraSettingsTest {
         assertEquals(saved.mode, loaded.mode);
         assertEquals(saved.radius, loaded.radius);
         assertEquals(saved.speed, loaded.speed);
-        assertEquals(saved.heightOffset, loaded.heightOffset);
+        assertEquals(saved.heightY, loaded.heightY);
+        assertEquals(saved.playerHeightOffset, loaded.playerHeightOffset);
         assertEquals(saved.motionAmplitude, loaded.motionAmplitude);
         assertEquals(saved.turnRateDegreesPerSecond, loaded.turnRateDegreesPerSecond);
     }
@@ -90,10 +93,64 @@ class CameraSettingsTest {
     }
 
     @Test
+    void extendedCameraDistanceAndAbsoluteYBoundsSurviveSaveAndReload() {
+        Path path = directory.resolve("camera.properties");
+        CameraSettings settings = new CameraSettings(path);
+        settings.radius = 256;
+        settings.playerHeightOffset = 12;
+        for (double y : new double[]{-64, 256}) {
+            settings.heightY = y;
+            assertTrue(settings.save(LoggerFactory.getLogger(getClass())));
+            CameraSettings loaded = new CameraSettings(path);
+            loaded.load(LoggerFactory.getLogger(getClass()));
+
+            assertEquals(256, loaded.radius);
+            assertEquals(y, loaded.heightY);
+            assertEquals(12, loaded.playerHeightOffset);
+            assertEquals(2.5, loaded.speed);
+            assertEquals(8, loaded.motionAmplitude);
+        }
+    }
+
+    @Test
+    void legacyRelativeHeightMigratesOnlyToPlayerOffsetAndNeverToAbsoluteY() throws Exception {
+        Path path = directory.resolve("camera.properties");
+        Files.writeString(path, "camera.radius=18\ncamera.height-offset=9\n");
+        CameraSettings settings = new CameraSettings(path);
+        settings.load(LoggerFactory.getLogger(getClass()));
+
+        assertEquals(18, settings.radius);
+        assertEquals(80, settings.heightY);
+        assertEquals(9, settings.playerHeightOffset);
+        assertTrue(settings.save(LoggerFactory.getLogger(getClass())));
+        String saved = Files.readString(path);
+        assertTrue(saved.contains("camera.height-y=80.0"));
+        assertTrue(saved.contains("camera.player-height-offset=9.0"));
+        assertFalse(saved.contains("camera.height-offset="));
+    }
+
+    @Test
+    void newHeightFieldsTakePrecedenceOverLegacyRelativeHeight() throws Exception {
+        Path path = directory.resolve("camera.properties");
+        Files.writeString(path, "camera.height-y=120\ncamera.player-height-offset=7\ncamera.height-offset=9\n");
+        CameraSettings settings = new CameraSettings(path);
+        settings.load(LoggerFactory.getLogger(getClass()));
+
+        assertEquals(120, settings.heightY);
+        assertEquals(7, settings.playerHeightOffset);
+    }
+
+    @Test
     void validationRejectsNonFiniteValuesAndOutOfRangeParameters() {
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 13, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 4, 25, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 4, 8, Double.NaN));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(null, 12, 2.5, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 257, 2.5, 80, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 257, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, -65, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, Double.NaN, 2.5, 80, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, Double.POSITIVE_INFINITY, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 0, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 13, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 4, 25, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 4, 8, Double.NaN));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(null, 12, 2.5, 80, 4, 8, 30));
     }
 }

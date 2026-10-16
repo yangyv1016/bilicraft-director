@@ -13,6 +13,10 @@ final class SceneArrival {
         this.startedAt = startedAt;
     }
 
+    CameraMotion.Point destination() {
+        return destination;
+    }
+
     boolean takeTeleportCommand(long now) {
         if (commandSent || now - startedAt < 250 || timedOut(now)) {
             return false;

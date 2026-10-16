@@ -2,7 +2,7 @@ package dev.bilicraft.director.protocol;
 
 public final class Protocol {
     public static final int MAGIC = 0x42434452;
-    public static final int VERSION = 4;
+    public static final int VERSION = 5;
     public static final String CHANNEL = "bilicraftdirector:director";
     public static final int MAX_PACKET_BYTES = 30_000;
     public static final int MAX_PLAYERS = 128;

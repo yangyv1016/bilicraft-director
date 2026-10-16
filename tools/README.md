@@ -60,7 +60,7 @@ node tools/integration-smoke.mjs --verify-persistence
 ## 协议依据
 
 插件 payload 按 [共享协议文档](../protocol/README.md) 独立编码/解码。
-当前 wire version 为4，包含 requestId 关联的地图源元数据；脚本编解码支持 type11/12，
+当前 wire version 为5，包含 requestId 关联的地图源元数据与独立世界巡游政策；脚本编解码支持 type11/12/13，
 已有 smoke 流程不会因此自动配置地图地址或下载外链。外链 HTTP、ETag、限额与失败缓存通过纯 Java 回环 HTTP 测试单独验证。
 Minecraft 1.21.11 的 `custom_payload`、`system_chat` NBT 组件、`chat_command`、
 `teleport_confirm` 和移动字段，以安装的 `minecraft-data` 包定义及

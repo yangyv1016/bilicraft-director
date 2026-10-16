@@ -3,17 +3,17 @@
 纯 Java 21 模块，无 Minecraft、Fabric、Paper 或 JSON 库依赖。通过游戏连接的
 `bilicraftdirector:director` custom payload 传输 `Codec.encode` 产生的原始字节。
 
-每包依次包含 4 字节 magic `0x42434452`（`BCDR`）、2 字节 wire version `4`、1 字节消息类型，
+每包依次包含 4 字节 magic `0x42434452`（`BCDR`）、2 字节 wire version `5`、1 字节消息类型，
 随后为对应消息的固定顺序字段，数值采用大端序。固定字段布局不存在重复命名字段；
 任何额外字段作为尾随数据拒绝，Snapshot 同时禁止重复玩家 UUID 和重复场景 `(world, id)`。
 
 `Hello.version` 和 `HelloReply.version` 是应用握手版本，不是包头的 wire version。
 Codec 接受未知的握手版本，便于服务端返回明确的版本不匹配拒绝；未知 wire version
 则无法安全解释字段，直接拒绝解码。v2 新增场景列表，v3 新增玩家计划时长与时长授权调整，
-v4 新增客户端直连外链所需的地图源元数据。双端必须一起升级；不接受 v1/v2/v3 包头，不把缺失字段当成默认值。
+v4 新增客户端直连外链所需的地图源元数据，v5 新增独立的世界巡游政策。双端必须一起升级；不接受 v1～v4 网络包头，不把缺失字段当成默认值。本机场景缓存可单独迁移 v4 场景快照，不代表网络兼容。
 
 消息编号：Hello=0、HelloReply=1、SnapshotRequest=2、Snapshot=3、ObserveRequest=4、
-ObserveUpdate=5、Stop=6、Heartbeat=7、Error=8、DurationRequest=9、DurationReply=10、MapRequest=11、MapSource=12。
+ObserveUpdate=5、Stop=6、Heartbeat=7、Error=8、DurationRequest=9、DurationReply=10、MapRequest=11、MapSource=12、WorldPolicy=13。
 ObserveState 顺序为 NOTICE=0、FOLLOWING=1、ENDED=2。
 
 HelloReply 的字段依次是 version（32 位整数）、allowed（布尔）、worldKey（最多 256 UTF-8
@@ -70,13 +70,21 @@ baseUrl（1024 UTF-8字节）、dynmapWorld（256 UTF-8字节）、排除区数�
 拒绝提供映射，不能截断隐私规则。URL仅允许无账号密码、查询和片段的 HTTP(S) 部署地址。
 
 worldKey 必须与摄影机当前世界一致，客户端同时匹配 requestId，拒绝超时、重试或跨世界的迟到回复。
-服务端仍验证真实摄影机握手、权限和允许世界，但地图元数据不代替玩家授权，也不更新 HelloReply 的业务状态。
+服务端仍验证真实摄影机握手与数据权限，但地图映射不要求该世界加入巡游名单。地图元数据不代替玩家授权，也不更新 HelloReply 的业务状态。
 客户端自行拼接 `tiles/_markers_/marker_<URL编码Dynmap世界>.json`，手动操作才直连外链；
 地图文件、导入场景和玩家数据不会通过这两个消息在服务器中转。
+
+WorldPolicy 依次是 worldKey（最多256 UTF-8字节）、worldId（UUID）、automaticPatrol（布尔）、
+排除区数量（2字节无符号整数，最多64）及完整 RegionBounds 列表。worldKey 必须非空白且不含控制字符，
+区域数值有限且 min 不大于 max。成功握手先发送当前世界政策再发送 HelloReply，心跳与名单变更也会同步政策；
+不依赖配置地图外链。客户端仅接受当前世界的政策，按服务器与世界独立缓存，不保存玩家数据。
+automaticPatrol=false 只暂停自动巡游及自动/AI补点，保留手动选点；所有入口继续检查排除区、
+玩家隐私和本人 Minecraft 命令权限。规则失联保留已知缓存，首次插件规则同步期间暂停自动选点。
 
 玩家位置与角度必须有限；解码拒绝截断、非法类型/枚举、过大集合、额外数据。
 
 本模块只定义数据与编解码，不授权动作。服务端必须在处理消息时校验握手、账号权限、
-配置允许的世界、观察者模式、玩家拒绝状态与冷却；客户端也不能根据一个旧快照直接开始观察。
+配置与存储状态；玩家观察另校验观察者模式、排除区、玩家拒绝状态与冷却。巡游名单只限制自动行为，
+名单外的手动玩家观察仍走完整服务端许可。客户端不能根据一个旧快照直接开始观察。
 SceneView 是服务端提供的展示候选数据，ObserveRequest/ObserveUpdate 的 targetId 仍只表示
 玩家 UUID；观景点与巡游区域不复用玩家观察许可，也不生成玩家预告。

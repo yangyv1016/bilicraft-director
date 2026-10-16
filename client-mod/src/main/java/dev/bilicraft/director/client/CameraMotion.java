@@ -28,10 +28,12 @@ final class CameraMotion {
     }
 
     Shot sample(Subject subject, Point cameraPosition, CameraSettings settings) {
-        double radius = Math.min(subject.radius(), settings.radius);
+        double radius = subject.player() ? Math.min(24, Math.min(subject.radius(), settings.radius)) : settings.radius;
+        double height = subject.player() ? settings.playerHeightOffset : settings.heightY;
         Point center = subject.center();
+        double cameraY = subject.player() ? center.y() + height : height;
         if (!subject.id().equals(subjectId) || mode != settings.mode
-                || anchorRadius != radius || anchorHeight != settings.heightOffset) {
+                || anchorRadius != radius || anchorHeight != height) {
             subjectId = subject.id();
             mode = settings.mode;
             double dx = cameraPosition.x() - center.x();
@@ -39,8 +41,9 @@ final class CameraMotion {
             baseAngle = dx * dx + dz * dz < 0.01 ? 0 : Math.atan2(dz, dx);
             phase = 0;
             anchorRadius = radius;
-            anchorHeight = settings.heightOffset;
-            fixedPosition = center.offset(Math.cos(baseAngle) * radius, settings.heightOffset, Math.sin(baseAngle) * radius);
+            anchorHeight = height;
+            fixedPosition = new Point(center.x() + Math.cos(baseAngle) * radius, cameraY,
+                    center.z() + Math.sin(baseAngle) * radius);
         }
         double radialX = Math.cos(baseAngle);
         double radialZ = Math.sin(baseAngle);
@@ -53,8 +56,8 @@ final class CameraMotion {
             effectiveMode = Mode.FOLLOW;
         } else if (mode == Mode.AUTO && subject.area()) {
             double width = Math.min(radius, settings.motionAmplitude);
-            position = center.offset(Math.sin(phase) * radius, settings.heightOffset,
-                    Math.sin(2 * phase) * width * 0.5);
+            position = new Point(center.x() + Math.sin(phase) * radius, cameraY,
+                    center.z() + Math.sin(2 * phase) * width * 0.5);
             lookAt = center.offset(Math.sin(phase + 0.3) * radius, 0,
                     Math.sin(2 * (phase + 0.3)) * width * 0.5);
             return new Shot(position, lookAt);
@@ -62,7 +65,8 @@ final class CameraMotion {
         switch (effectiveMode) {
             case FOLLOW -> {
                 double angle = subject.player() ? Math.toRadians(subject.yawDegrees()) - Math.PI / 2 + 0.49 : baseAngle;
-                position = center.offset(Math.cos(angle) * radius, settings.heightOffset, Math.sin(angle) * radius);
+                position = new Point(center.x() + Math.cos(angle) * radius, cameraY,
+                        center.z() + Math.sin(angle) * radius);
                 // If AUTO falls back to an orbit after movement stops, begin at the trailing side.
                 if (mode == Mode.AUTO) {
                     baseAngle = angle - phase;
@@ -70,23 +74,23 @@ final class CameraMotion {
             }
             case DOLLY -> {
                 double distance = radius - (1 - Math.cos(phase)) * Math.min(radius - 2, settings.motionAmplitude * 0.5) * 0.5;
-                position = center.offset(radialX * distance, settings.heightOffset, radialZ * distance);
+                position = new Point(center.x() + radialX * distance, cameraY, center.z() + radialZ * distance);
             }
             case TRUCK -> {
                 double slide = Math.sin(phase) * Math.min(radius * 0.6, settings.motionAmplitude * 0.5);
-                position = center.offset(radialX * radius * 0.8 - radialZ * slide, settings.heightOffset,
-                        radialZ * radius * 0.8 + radialX * slide);
+                position = new Point(center.x() + radialX * radius * 0.8 - radialZ * slide, cameraY,
+                        center.z() + radialZ * radius * 0.8 + radialX * slide);
             }
-            case CRANE -> position = center.offset(radialX * radius,
-                    settings.heightOffset + Math.sin(phase) * settings.motionAmplitude * 0.25, radialZ * radius);
+            case CRANE -> position = new Point(center.x() + radialX * radius,
+                    cameraY + Math.sin(phase) * settings.motionAmplitude * 0.25, center.z() + radialZ * radius);
             case PAN -> {
-                position = fixedPosition;
+                position = new Point(fixedPosition.x(), cameraY, fixedPosition.z());
                 double sweep = Math.sin(phase) * settings.motionAmplitude * 0.5;
                 lookAt = center.offset(-radialZ * sweep, 0, radialX * sweep);
             }
-            case STATIC -> position = fixedPosition;
-            case AUTO, ORBIT -> position = center.offset(Math.cos(baseAngle + phase) * radius,
-                    settings.heightOffset, Math.sin(baseAngle + phase) * radius);
+            case STATIC -> position = new Point(fixedPosition.x(), cameraY, fixedPosition.z());
+            case AUTO, ORBIT -> position = new Point(center.x() + Math.cos(baseAngle + phase) * radius,
+                    cameraY, center.z() + Math.sin(baseAngle + phase) * radius);
             default -> throw new IllegalStateException("Unknown camera mode: " + effectiveMode);
         }
         return new Shot(position, lookAt);

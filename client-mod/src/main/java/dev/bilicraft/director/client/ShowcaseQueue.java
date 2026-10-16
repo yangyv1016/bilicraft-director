@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.random.RandomGenerator;
 
 /** Game-thread queue state. It selects existing targets and never moves the camera or requests server data. */
@@ -204,6 +205,10 @@ public final class ShowcaseQueue {
         return pending.isEmpty() ? null : pending.removeFirst();
     }
 
+    public Entry peek() {
+        return pending.isEmpty() ? null : pending.getFirst();
+    }
+
     public void start(Entry entry, long now) {
         pending.removeIf(item -> item.source() == Source.AUTO && item.target().id().equals(entry.target().id()));
         current = entry;
@@ -241,6 +246,17 @@ public final class ShowcaseQueue {
         if (current != null && current.target() instanceof ShowcaseTarget.Player) {
             finishCurrent();
         }
+    }
+
+    /** Remove ineligible automatic entries without changing explicit manual choices. */
+    public Entry pruneAutomatic(Predicate<ShowcaseTarget> eligible) {
+        pending.removeIf(entry -> entry.source() == Source.AUTO && !eligible.test(entry.target()));
+        if (current != null && current.source() == Source.AUTO && !eligible.test(current.target())) {
+            Entry ended = current;
+            finishCurrent();
+            return ended;
+        }
+        return null;
     }
 
     public void suppress(String targetId, long until) {

@@ -166,7 +166,7 @@
                                 <dd id="selectionWorld">—</dd>
                                 <dt>位置</dt>
                                 <dd id="selectionCoordinates">—</dd>
-                                <dt>路径半径</dt>
+                                <dt>景点区域半径</dt>
                                 <dd id="selectionRadius">—</dd>
                             </dl>
                             <div class="entry-duration-row">
@@ -298,9 +298,10 @@
                                 <button id="saveLiveCamera" class="button compact" disabled>保存当前运镜</button>
                             </div>
                             <div class="live-camera-sliders">
-                                <label>距离 <output id="liveRadiusValue">12 格</output><input id="liveRadius" data-camera-setting="radius" aria-label="实时镜头距离" type="range" min="6" max="24" step="0.5" value="12" disabled></label>
+                                <label>距离 <output id="liveRadiusValue">12 格</output><input id="liveRadius" data-camera-setting="radius" aria-label="实时镜头距离" type="range" min="6" max="256" step="0.5" value="12" disabled></label>
                                 <label>速度 <output id="liveSpeedValue">2.5 格/秒</output><input id="liveSpeed" data-camera-setting="speed" aria-label="实时移动速度" type="range" min="0.5" max="5" step="0.1" value="2.5" disabled></label>
-                                <label>高度 <output id="liveHeightOffsetValue">4 格</output><input id="liveHeightOffset" data-camera-setting="heightOffset" aria-label="实时机位高度" type="range" min="1" max="12" step="0.5" value="4" disabled></label>
+                                <label>场景 Y <output id="liveHeightYValue">80</output><input id="liveHeightY" data-camera-setting="heightY" aria-label="实时场景绝对 Y 坐标" type="range" min="-64" max="256" step="0.5" value="80" disabled></label>
+                                <label>跟拍高度 <output id="livePlayerHeightOffsetValue">4 格</output><input id="livePlayerHeightOffset" data-camera-setting="playerHeightOffset" aria-label="实时玩家跟拍高度偏移" type="range" min="1" max="12" step="0.5" value="4" disabled></label>
                                 <label>幅度 <output id="liveMotionAmplitudeValue">8 格</output><input id="liveMotionAmplitude" data-camera-setting="motionAmplitude" aria-label="实时运动幅度" type="range" min="2" max="24" step="0.5" value="8" disabled></label>
                                 <label>转向 <output id="liveTurnRateDegreesPerSecondValue">30 度/秒</output><input id="liveTurnRateDegreesPerSecond" data-camera-setting="turnRateDegreesPerSecond" aria-label="实时转向速度" type="range" min="6" max="80" step="1" value="30" disabled></label>
                             </div>
@@ -387,7 +388,7 @@
                     <section id="cameraConfig" class="configuration-panel" aria-label="运镜配置">
                         <div class="configuration-heading">
                             <h2>运镜参数</h2>
-                            <p>选择镜头模式并调整构图。客户端负责平滑移动，场景机位受各自路径范围限制。</p>
+                            <p>场景和本地巡游直接设置摄影机的绝对 Y 坐标；玩家跟拍随玩家升降，并使用独立的跟拍高度。调整均平滑过渡。</p>
                         </div>
                         <div class="configuration-columns">
                             <section class="configuration-card camera-settings-card">
@@ -409,8 +410,8 @@
                                     <label class="slider-label" for="radiusRange">镜头距离 <span>格</span>
                                     </label>
                                     <div class="slider-control">
-                                        <input id="radiusRange" type="range" min="6" max="24" step="1" value="12">
-                                        <input id="radiusNumber" type="number" min="6" max="24" step="any" required value="12" aria-label="镜头距离数值">
+                                        <input id="radiusRange" type="range" min="6" max="256" step="1" value="12">
+                                        <input id="radiusNumber" type="number" min="6" max="256" step="any" required value="12" aria-label="镜头距离数值">
                                     </div>
                                     <label class="slider-label" for="speedRange">移动速度 <span>格 / 秒</span>
                                     </label>
@@ -418,10 +419,16 @@
                                         <input id="speedRange" type="range" min="0.5" max="5" step="0.5" value="2.5">
                                         <input id="speedNumber" type="number" min="0.5" max="5" step="any" required value="2.5" aria-label="移动速度数值">
                                     </div>
-                                    <label class="slider-label" for="heightOffsetRange">机位高度偏移 <span>格</span></label>
+                                    <label class="slider-label" for="heightYRange">场景绝对 Y 坐标</label>
                                     <div class="slider-control">
-                                        <input id="heightOffsetRange" type="range" min="1" max="12" step="0.5" value="4">
-                                        <input id="heightOffsetNumber" type="number" min="1" max="12" step="any" required value="4" aria-label="机位高度偏移数值">
+                                        <input id="heightYRange" type="range" min="-64" max="256" step="0.5" value="80">
+                                        <input id="heightYNumber" type="number" min="-64" max="256" step="any" required value="80" aria-label="场景绝对 Y 坐标数值">
+                                    </div>
+                                    <p class="field-help">填 120 即机位 Y=120，不叠加景点海拔；升降运镜在此 Y 基准附近运动。</p>
+                                    <label class="slider-label" for="playerHeightOffsetRange">玩家跟拍高度偏移 <span>格</span></label>
+                                    <div class="slider-control">
+                                        <input id="playerHeightOffsetRange" type="range" min="1" max="12" step="0.5" value="4">
+                                        <input id="playerHeightOffsetNumber" type="number" min="1" max="12" step="any" required value="4" aria-label="玩家跟拍高度偏移数值">
                                     </div>
                                     <label class="slider-label" for="motionAmplitudeRange">运动幅度 <span>格</span></label>
                                     <div class="slider-control">
@@ -446,11 +453,11 @@
                                 <p>应用并保存后，由 Mod 的同一运镜入口执行。不会启动已经停止的导播。</p>
                                 <dl>
                                     <dt>镜头距离</dt>
-                                    <dd>6–24 格，数值框支持小数；景点按路径半径收紧。</dd>
+                                    <dd>6–256 格，支持小数；场景镜头不受地图标记半径收紧，玩家跟随距离保持在 24 格以内。</dd>
                                     <dt>移动速度</dt>
                                     <dd>0.5–5 格 / 秒</dd>
                                     <dt>高度与运动幅度</dt>
-                                    <dd>高度偏移 1–12 格；幅度 2–24 格，用于推进、横移、升降、摇镜及自动区域巡游。路径范围不足时自动收紧。</dd>
+                                    <dd>场景绝对 Y 为 −64–256，默认 80，机位仍须位于当前世界高度范围内。玩家跟拍高度为 1–12 格，默认 4 格，随玩家升降。运动幅度仍为 2–24 格。</dd>
                                     <dt>转向速度</dt>
                                     <dd>6–80 度 / 秒，越低转头越舒缓。移动速度与转头速度独立调整。</dd>
                                 </dl>

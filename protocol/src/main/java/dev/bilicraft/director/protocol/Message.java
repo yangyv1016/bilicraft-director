@@ -56,6 +56,13 @@ public sealed interface Message {
         }
     }
 
+    record WorldPolicy(String worldKey, UUID worldId, boolean automaticPatrol,
+                       List<RegionBounds> exclusions) implements Message {
+        public WorldPolicy {
+            exclusions = List.copyOf(exclusions);
+        }
+    }
+
     record RegionBounds(double minX, double minZ, double maxX, double maxZ) {
     }
 

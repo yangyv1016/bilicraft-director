@@ -11,6 +11,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.UUID;
 
 public final class Codec {
@@ -162,6 +163,20 @@ public final class Codec {
                 }
                 writeString(output, source.detail(), 512);
             }
+            case Message.WorldPolicy policy -> {
+                output.writeByte(13);
+                validateWorldPolicy(policy);
+                writeString(output, policy.worldKey(), MAX_WORLD_BYTES);
+                writeUuid(output, policy.worldId());
+                output.writeBoolean(policy.automaticPatrol());
+                output.writeShort(policy.exclusions().size());
+                for (Message.RegionBounds region : policy.exclusions()) {
+                    output.writeDouble(region.minX());
+                    output.writeDouble(region.minZ());
+                    output.writeDouble(region.maxX());
+                    output.writeDouble(region.maxZ());
+                }
+            }
             case null -> throw new IOException("Message is required");
         }
         if (bytes.size() > Protocol.MAX_PACKET_BYTES) {
@@ -302,6 +317,22 @@ public final class Codec {
                 validateMapSource(source);
                 yield source;
             }
+            case 13 -> {
+                String worldKey = readString(input, MAX_WORLD_BYTES);
+                UUID worldId = readUuid(input);
+                boolean automaticPatrol = readBoolean(input);
+                int count = input.readUnsignedShort();
+                if (count > Protocol.MAX_MAP_EXCLUSIONS) {
+                    throw new IOException("Too many world exclusion regions");
+                }
+                ArrayList<Message.RegionBounds> regions = new ArrayList<>(count);
+                for (int index = 0; index < count; index++) {
+                    regions.add(new Message.RegionBounds(input.readDouble(), input.readDouble(), input.readDouble(), input.readDouble()));
+                }
+                Message.WorldPolicy policy = new Message.WorldPolicy(worldKey, worldId, automaticPatrol, regions);
+                validateWorldPolicy(policy);
+                yield policy;
+            }
             default -> throw new IOException("Unknown message type");
         };
         if (input.available() != 0) {
@@ -405,7 +436,20 @@ public final class Codec {
         } else if (!source.baseUrl().isEmpty() || !source.dynmapWorld().isEmpty() || !source.exclusions().isEmpty()) {
             throw new IOException("Unconfigured map source must not carry a URL, world or regions");
         }
-        for (Message.RegionBounds region : source.exclusions()) {
+        validateRegions(source.exclusions());
+    }
+
+    private static void validateWorldPolicy(Message.WorldPolicy policy) throws IOException {
+        if (policy.worldKey() == null || policy.worldKey().isBlank()
+                || policy.worldKey().codePoints().anyMatch(Character::isISOControl) || policy.worldId() == null
+                || policy.exclusions().size() > Protocol.MAX_MAP_EXCLUSIONS) {
+            throw new IOException("Invalid world policy");
+        }
+        validateRegions(policy.exclusions());
+    }
+
+    private static void validateRegions(List<Message.RegionBounds> regions) throws IOException {
+        for (Message.RegionBounds region : regions) {
             if (!Double.isFinite(region.minX()) || !Double.isFinite(region.minZ())
                     || !Double.isFinite(region.maxX()) || !Double.isFinite(region.maxZ())
                     || region.minX() > region.maxX() || region.minZ() > region.maxZ()) {

@@ -53,6 +53,17 @@ class SceneArrivalTest {
     }
 
     @Test
+    void extendedSceneArrivalWaitsForTheCameraPositionRatherThanTheMarkerCenter() {
+        CameraMotion.Point markerCenter = new CameraMotion.Point(1_000, 70, 2_000);
+        SceneArrival arrival = new SceneArrival(new CameraMotion.Point(markerCenter.x() + 256, 256, markerCenter.z()), 0);
+        assertTrue(arrival.takeTeleportCommand(250));
+        assertEquals("minecraft:tp @s 1256.0 256.0 2000.0", arrival.teleportCommand());
+        assertFalse(arrival.arrived(markerCenter, true));
+        assertFalse(arrival.arrived(arrival.destination(), false));
+        assertTrue(arrival.arrived(arrival.destination(), true));
+    }
+
+    @Test
     void travelAndArrivalTicksPreservePlaybackDurationAndAdjustments() {
         ShowcaseQueue queue = new ShowcaseQueue();
         ShowcaseTarget scene = new ShowcaseTarget.Scene(new Message.SceneView("far", "远处景点",

@@ -61,7 +61,7 @@ public final class DirectorScreen extends Screen {
             director.saveSettings();
         }).dimensions(x, y, 60, rowHeight).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("半径 ＋"), button -> {
-            director.settings.radius = Math.min(24, director.settings.radius + 1);
+            director.settings.radius = Math.min(256, director.settings.radius + 1);
             director.saveSettings();
         }).dimensions(x + panelWidth - 60, y, 60, rowHeight).build());
         y += rowHeight + gap;

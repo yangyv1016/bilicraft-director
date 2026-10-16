@@ -25,6 +25,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerAnimationEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -90,7 +91,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 }
                 World legacyWorld = Bukkit.getWorld(legacyName);
                 if (legacyWorld != null && legacyWorld.getName().equals(legacyName)) {
-                    WorldCatalog.Profile profile = new WorldCatalog.Profile(legacyWorld.getUID(), legacyWorld.getName(),
+                    WorldCatalog.Profile profile = new WorldCatalog.Profile(legacyWorld.getUID(), legacyWorld.getName(), true,
                             SceneConfiguration.parseEntries(getConfig().get("scenes", List.of())),
                             SceneConfiguration.parseExclusions(getConfig().get("exclude-regions", List.of())));
                     buildWorldContext(legacyWorld, profile);
@@ -105,10 +106,13 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 if (loaded != null) {
                     WorldContext context = buildWorldContext(loaded, profile);
                     if (!profile.lastKnownName().equals(loaded.getName())) {
-                        worlds.put(new WorldCatalog.Profile(profile.id(), loaded.getName(), profile.scenes(), profile.exclusions()));
+                        worlds.put(new WorldCatalog.Profile(profile.id(), loaded.getName(), profile.automaticPatrol(), profile.scenes(), profile.exclusions()));
                     }
                     worldContexts.put(profile.id(), context);
                 }
+            }
+            for (World world : Bukkit.getWorlds()) {
+                worldContexts.putIfAbsent(world.getUID(), new WorldContext(world, List.of(), List.of()));
             }
             privacy = new PrivacyStore(getDataFolder().toPath().resolve("privacy.properties"));
             mapSources = new MapSources(getDataFolder().toPath().resolve("map-sources.yml"));
@@ -135,8 +139,13 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             if (args[0].equalsIgnoreCase("map") && sender.hasPermission(MAP_PERMISSION)) {
                 if (args.length == 2) return List.of("set", "clear", "status").stream()
                         .filter(value -> value.startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
-                if (args.length == 3) return worlds.profiles().stream().map(WorldCatalog.Profile::lastKnownName)
-                        .filter(name -> name.startsWith(args[2])).sorted().toList();
+                if (args.length == 3) {
+                    Set<String> names = new HashSet<>();
+                    Bukkit.getWorlds().forEach(world -> names.add(world.getName()));
+                    worlds.profiles().forEach(profile -> names.add(profile.lastKnownName()));
+                    mapSources.sources().forEach(source -> names.add(source.lastKnownName()));
+                    return names.stream().filter(name -> name.startsWith(args[2])).sorted().toList();
+                }
             }
             if (args[0].equalsIgnoreCase("worlds") && sender.hasPermission(WORLDS_PERMISSION)) {
                 if (args.length == 2) {
@@ -145,9 +154,11 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 }
                 if (args.length == 3) {
                     List<String> names = args[1].equalsIgnoreCase("add")
-                            ? Bukkit.getWorlds().stream().filter(world -> worlds.get(world.getUID()) == null).map(World::getName).toList()
+                            ? Bukkit.getWorlds().stream().filter(world -> worlds.get(world.getUID()) == null
+                                    || !worlds.get(world.getUID()).automaticPatrol()).map(World::getName).toList()
                             : args[1].equalsIgnoreCase("remove")
-                            ? worlds.profiles().stream().map(WorldCatalog.Profile::lastKnownName).toList() : List.of();
+                            ? worlds.profiles().stream().filter(WorldCatalog.Profile::automaticPatrol)
+                                    .map(WorldCatalog.Profile::lastKnownName).toList() : List.of();
                     return names.stream().filter(name -> name.startsWith(args[2])).sorted().toList();
                 }
             }
@@ -175,7 +186,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             recordActivity(player);
         }
         Bukkit.getScheduler().runTaskTimer(this, this::tick, 1L, 1L);
-        getLogger().info("BiliCraft 导播服务已启动，允许 " + worlds.profiles().size() + " 个世界，当前已加载 "
+        getLogger().info("BiliCraft 导播服务已启动，自动巡游 " + worlds.profiles().stream().filter(WorldCatalog.Profile::automaticPatrol).count() + " 个世界，当前已加载 "
                 + worldContexts.size() + " 个；本阶段不采集热力图、不提供远程传送。");
     }
 
@@ -243,12 +254,13 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             boolean compatible = hello.version() == Protocol.VERSION;
             if (compatible && allowed) {
                 handshakes.add(camera.getUniqueId());
+                sendWorldPolicy(camera);
             } else {
                 handshakes.remove(camera.getUniqueId());
                 endCamera(camera.getUniqueId(), "协议或摄影机权限不满足");
             }
             send(camera, new Message.HelloReply(Protocol.VERSION, compatible && allowed, camera.getWorld().getKey().toString(),
-                    !compatible ? "协议版本不兼容" : allowed ? "已授权" : cameraDeniedReason()));
+                    !compatible ? "协议版本不兼容" : allowed ? "数据访问正常" : cameraDeniedReason()));
             return;
         }
         if (message instanceof Message.DurationRequest request) {
@@ -264,9 +276,9 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             }
             MapSources.Source source = mapSources.get(camera.getWorld().getUID());
             WorldContext context = worldContexts.get(camera.getWorld().getUID());
-            if (source == null || context.exclusions().size() > Protocol.MAX_MAP_EXCLUSIONS) {
-                send(camera, new Message.MapSource(request.requestId(), worldKey, false, "", "", List.of(), source == null
-                        ? "该世界尚未配置 Dynmap 外链映射，请联系管理员" : "排除区超过64个，拒绝下发不完整隐私规则"));
+            if (source == null) {
+                send(camera, new Message.MapSource(request.requestId(), worldKey, false, "", "", List.of(),
+                        "该世界尚未配置 Dynmap 外链映射，请联系管理员"));
             } else {
                 List<Message.RegionBounds> exclusions = context.exclusions().stream().map(bounds ->
                         new Message.RegionBounds(bounds.minX(), bounds.minZ(), bounds.maxX(), bounds.maxZ())).toList();
@@ -287,6 +299,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             if (session != null) {
                 session.heartbeatAt = now;
             }
+            sendWorldPolicy(camera);
             send(camera, new Message.HelloReply(Protocol.VERSION, true, camera.getWorld().getKey().toString(), "连接正常"));
         } else if (message instanceof Message.SnapshotRequest) {
             long previous = lastSnapshot.getOrDefault(camera.getUniqueId(), 0L);
@@ -314,9 +327,6 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             SceneConfiguration.Bounds worldBorder = currentWorldBorder(context.world());
             List<Message.SceneView> nearbyScenes = context.scenes().stream()
                     .filter(scene -> SceneConfiguration.fitsPatrolArea(scene, worldBorder, context.exclusions()))
-                    .filter(scene -> cameraLocation.distanceSquared(new Location(context.world(), scene.x(), scene.y(), scene.z()))
-                            <= (128 - scene.radius()) * (128 - scene.radius()))
-                    .filter(scene -> sceneChunksLoaded(context.world(), scene))
                     .sorted(Comparator.comparingDouble(scene -> cameraLocation.distanceSquared(
                             new Location(context.world(), scene.x(), scene.y(), scene.z())))).toList();
             send(camera, new Message.Snapshot(candidates, nearbyScenes));
@@ -328,6 +338,10 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     }
 
     private void requestObservation(Player camera, UUID targetId, int requestedSeconds, long now) {
+        if (!observationCameraEligible(camera)) {
+            send(camera, new Message.Error("玩家观察需要观察者模式，且摄影机须在世界边界内、排除区外"));
+            return;
+        }
         if (requestedSeconds != 0 && (requestedSeconds < Protocol.MIN_FOLLOW_SECONDS || requestedSeconds > Protocol.MAX_FOLLOW_SECONDS)) {
             send(camera, new Message.Error("玩家跟随总时长必须为 180～480 秒"));
             return;
@@ -458,7 +472,7 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     }
 
     private String invalidSessionReason(ObservationSessions.Session session, Player camera, Player target, long now) {
-        if (camera == null || !cameraAllowed(camera) || !handshakes.contains(session.camera)) {
+        if (camera == null || !cameraAllowed(camera) || !observationCameraEligible(camera) || !handshakes.contains(session.camera)) {
             return "摄影机离线或权限、模式、活动范围失效";
         }
         if (now - session.heartbeatAt >= ObservationSessions.HEARTBEAT_TIMEOUT_MILLIS) {
@@ -480,12 +494,15 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     }
 
     private boolean cameraAllowed(Player camera) {
-        return !storageUnavailable && camera.hasPermission(DATA_PERMISSION)
-                && camera.getGameMode() == GameMode.SPECTATOR && insidePatrolArea(camera.getLocation());
+        return !storageUnavailable && camera.hasPermission(DATA_PERMISSION);
+    }
+
+    private boolean observationCameraEligible(Player camera) {
+        return camera.getGameMode() == GameMode.SPECTATOR && insideViewingArea(camera.getLocation());
     }
 
     private String cameraDeniedReason() {
-        return "需要 bilicraftdirector.data.read 权限、观察者模式及已允许世界的有效区域；配置和隐私存储也必须可用";
+        return "需要 bilicraftdirector.data.read 数据访问权限，配置和隐私存储必须可用";
     }
 
     private boolean targetEligible(Player camera, Player target) {
@@ -493,10 +510,10 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 && camera.getWorld().equals(target.getWorld())
                 && target.getGameMode() != GameMode.SPECTATOR && camera.canSee(target)
                 && !target.isInvisible() && target.getMetadata("vanished").stream().noneMatch(value -> value.asBoolean())
-                && insidePatrolArea(target.getLocation());
+                && insideViewingArea(target.getLocation());
     }
 
-    private boolean insidePatrolArea(Location location) {
+    private boolean insideViewingArea(Location location) {
         WorldContext context = worldContexts.get(location.getWorld().getUID());
         if (context == null || !context.world().getWorldBorder().isInside(location)) {
             return false;
@@ -524,19 +541,23 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 center.getZ() - halfSize, center.getZ() + halfSize);
     }
 
-    private boolean sceneChunksLoaded(World world, Message.SceneView scene) {
-        int minChunkX = ((int) Math.floor(scene.x() - scene.radius())) >> 4;
-        int maxChunkX = ((int) Math.floor(scene.x() + scene.radius())) >> 4;
-        int minChunkZ = ((int) Math.floor(scene.z() - scene.radius())) >> 4;
-        int maxChunkZ = ((int) Math.floor(scene.z() + scene.radius())) >> 4;
-        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                if (!world.isChunkLoaded(chunkX, chunkZ)) {
-                    return false;
-                }
+    private void sendWorldPolicy(Player camera) {
+        World world = camera.getWorld();
+        WorldCatalog.Profile profile = worlds.get(world.getUID());
+        WorldContext context = worldContexts.get(world.getUID());
+        List<Message.RegionBounds> exclusions = context.exclusions().stream().map(bounds ->
+                new Message.RegionBounds(bounds.minX(), bounds.minZ(), bounds.maxX(), bounds.maxZ())).toList();
+        send(camera, new Message.WorldPolicy(world.getKey().toString(), world.getUID(),
+                profile != null && profile.automaticPatrol(), exclusions));
+    }
+
+    private void pushWorldPolicy(UUID worldId) {
+        for (UUID cameraId : handshakes) {
+            Player camera = Bukkit.getPlayer(cameraId);
+            if (camera != null && camera.getWorld().getUID().equals(worldId) && cameraAllowed(camera)) {
+                sendWorldPolicy(camera);
             }
         }
-        return true;
     }
 
     private void endCamera(UUID camera, String reason) {
@@ -751,28 +772,32 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
         String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
         boolean setting = action.equals("set");
         if ((!setting && !(action.equals("clear") || action.equals("status"))) || args.length < (setting ? 5 : 3)) {
-            sender.sendMessage(Component.text("用法：/director map set <实际允许世界名> <Dynmap世界标识> <部署base URL> | map clear/status <世界名>", NamedTextColor.YELLOW));
+            sender.sendMessage(Component.text("用法：/director map set <实际已加载世界名> <Dynmap世界标识> <部署base URL> | map clear/status <世界名>", NamedTextColor.YELLOW));
             return true;
         }
         String worldName = String.join(" ", Arrays.copyOfRange(args, 2, setting ? args.length - 2 : args.length));
         World loaded = Bukkit.getWorld(worldName);
-        WorldCatalog.Profile profile = loaded != null && loaded.getName().equals(worldName) ? worlds.get(loaded.getUID()) : null;
-        if (profile == null && !setting) profile = worlds.profiles().stream()
-                .filter(entry -> entry.lastKnownName().equals(worldName)).findFirst().orElse(null);
-        if (profile == null) {
-            sender.sendMessage(Component.text("请指定允许名单中的精确世界名；set 还要求该世界已加载。请用 /director worlds list 核对。", NamedTextColor.RED));
+        UUID worldId = loaded != null && loaded.getName().equals(worldName) ? loaded.getUID() : null;
+        if (worldId == null && !setting) {
+            worldId = worlds.profiles().stream().filter(entry -> entry.lastKnownName().equals(worldName))
+                    .map(WorldCatalog.Profile::id).findFirst().orElse(null);
+            if (worldId == null) worldId = mapSources.sources().stream().filter(entry -> entry.lastKnownName().equals(worldName))
+                    .map(MapSources.Source::worldId).findFirst().orElse(null);
+        }
+        if (worldId == null) {
+            sender.sendMessage(Component.text("请指定精确世界名；set 要求该世界已加载，clear/status 支持已保存映射。无需加入巡游名单。", NamedTextColor.RED));
             return true;
         }
         if (action.equals("status")) {
-            MapSources.Source source = mapSources.get(profile.id());
+            MapSources.Source source = mapSources.get(worldId);
             sender.sendMessage(Component.text(source == null ? worldName + " 未配置外链地图映射。"
                     : worldName + " → Dynmap " + source.dynmapWorld() + " | " + source.baseUrl()
                     + "；由客户端手动直连下载，服务端不抓取地图。", NamedTextColor.AQUA));
             return true;
         }
         try {
-            if (setting) mapSources.put(new MapSources.Source(profile.id(), loaded.getName(), args[args.length - 1], args[args.length - 2]));
-            else mapSources.remove(profile.id());
+            if (setting) mapSources.put(new MapSources.Source(worldId, loaded.getName(), args[args.length - 1], args[args.length - 2]));
+            else mapSources.remove(worldId);
         } catch (IllegalArgumentException exception) {
             sender.sendMessage(Component.text("地图源无效：" + exception.getMessage(), NamedTextColor.RED));
             return true;
@@ -788,24 +813,25 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
 
     private boolean onWorldCommand(CommandSender sender, String[] args) {
         if (!sender.hasPermission(WORLDS_PERMISSION)) {
-            sender.sendMessage(Component.text("需要 " + WORLDS_PERMISSION + " 权限才能查看或管理世界允许名单。", NamedTextColor.RED));
+            sender.sendMessage(Component.text("需要 " + WORLDS_PERMISSION + " 权限才能查看或管理世界巡游名单。", NamedTextColor.RED));
             return true;
         }
         String action = args.length == 1 ? "list" : args[1].toLowerCase(Locale.ROOT);
         if (action.equals("list") && args.length <= 2) {
-            sender.sendMessage(Component.text("[BiliCraft 导播] 允许世界：" + worlds.profiles().size()
+            sender.sendMessage(Component.text("[BiliCraft 导播] 自动巡游世界：" + worlds.profiles().stream().filter(WorldCatalog.Profile::automaticPatrol).count()
                     + (storageUnavailable ? "；当前配置或存储故障，服务已禁用" : ""), NamedTextColor.AQUA));
             for (WorldCatalog.Profile profile : worlds.profiles().stream()
                     .sorted(Comparator.comparing(WorldCatalog.Profile::lastKnownName)).toList()) {
                 World loaded = Bukkit.getWorld(profile.id());
                 sender.sendMessage(Component.text("- " + (loaded == null ? profile.lastKnownName() : loaded.getName())
-                        + " | " + profile.id() + " | " + (loaded == null ? "允许，未加载"
-                        : "允许，已加载，" + loaded.getKey()), NamedTextColor.GREEN));
+                        + " | " + profile.id() + " | " + (profile.automaticPatrol() ? "巡游开启" : "巡游关闭，仅保留资料/手动展示")
+                        + (loaded == null ? "，未加载" : "，已加载，" + loaded.getKey()),
+                        profile.automaticPatrol() ? NamedTextColor.GREEN : NamedTextColor.GRAY));
             }
             for (World loaded : Bukkit.getWorlds()) {
                 if (worlds.get(loaded.getUID()) == null) {
                     sender.sendMessage(Component.text("- " + loaded.getName() + " | " + loaded.getUID()
-                            + " | 已加载，未允许", NamedTextColor.GRAY));
+                            + " | 已加载，未加入巡游名单，可手动展示", NamedTextColor.GRAY));
                 }
             }
             return true;
@@ -817,22 +843,25 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 sender.sendMessage(Component.text("找不到精确名称匹配的已加载世界。请先执行 /director worlds list；导播不会加载或猜测世界。", NamedTextColor.RED));
                 return true;
             }
-            if (worlds.get(loaded.getUID()) != null) {
-                sender.sendMessage(Component.text("该世界已经在允许名单中，现有场景和排除区保持不变。", NamedTextColor.YELLOW));
+            WorldCatalog.Profile previous = worlds.get(loaded.getUID());
+            if (previous != null && previous.automaticPatrol()) {
+                sender.sendMessage(Component.text("该世界已经在巡游名单中，现有场景和排除区保持不变。", NamedTextColor.YELLOW));
                 return true;
             }
             try {
-                WorldCatalog.Profile profile = new WorldCatalog.Profile(loaded.getUID(), loaded.getName(), List.of(), List.of());
+                WorldCatalog.Profile profile = new WorldCatalog.Profile(loaded.getUID(), loaded.getName(), true,
+                        previous == null ? List.of() : previous.scenes(), previous == null ? List.of() : previous.exclusions());
                 WorldContext context = buildWorldContext(loaded, profile);
                 worlds.put(profile);
                 worldContexts.put(profile.id(), context);
             } catch (IOException | IllegalArgumentException exception) {
-                failStorage("世界允许名单", exception);
+                failStorage("世界巡游名单", exception);
                 sender.sendMessage(Component.text("世界设置保存失败，全部数据与观察已禁用，请检查日志。", NamedTextColor.RED));
                 return true;
             }
-            sender.sendMessage(Component.text("已允许世界 " + loaded.getName() + "（" + loaded.getUID()
-                    + "）。场景和排除区为空，可在 worlds.yml 中独立配置；不会传送摄影机。", NamedTextColor.GREEN));
+            pushWorldPolicy(loaded.getUID());
+            sender.sendMessage(Component.text("已将世界 " + loaded.getName() + "（" + loaded.getUID()
+                    + "）加入自动巡游名单；现有场景、排除区和手动能力保留，不会传送摄影机。", NamedTextColor.GREEN));
             return true;
         }
         if (action.equals("remove") && args.length >= 3) {
@@ -841,20 +870,20 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
             if (profile == null) {
                 profile = worlds.profiles().stream().filter(entry -> entry.lastKnownName().equals(worldName)).findFirst().orElse(null);
             }
-            if (profile == null) {
-                sender.sendMessage(Component.text("允许名单中没有精确名称匹配的世界，请用 /director worlds list 核对。", NamedTextColor.RED));
+            if (profile == null || !profile.automaticPatrol()) {
+                sender.sendMessage(Component.text("巡游名单中没有精确名称匹配的世界，请用 /director worlds list 核对。", NamedTextColor.RED));
                 return true;
             }
             try {
-                worlds.remove(profile.id());
+                worlds.setAutomaticPatrol(profile.id(), false);
             } catch (IOException exception) {
-                failStorage("世界允许名单", exception);
+                failStorage("世界巡游名单", exception);
                 sender.sendMessage(Component.text("世界设置保存失败，全部数据与观察已禁用，请检查日志。", NamedTextColor.RED));
                 return true;
             }
-            revokeWorld(profile.id(), "该世界已从导播允许名单移除");
+            pushWorldPolicy(profile.id());
             sender.sendMessage(Component.text("已移除世界 " + profile.lastKnownName()
-                    + " 的允许记录及场景配置，重启不会自动重新添加；玩家隐私数据保留。", NamedTextColor.GREEN));
+                    + " 的自动巡游资格；保留场景、排除区、地图映射及手动展示，玩家隐私规则继续有效。", NamedTextColor.GREEN));
             return true;
         }
         sender.sendMessage(Component.text("用法：/director worlds list | add <实际已加载世界名> | remove <世界名>", NamedTextColor.YELLOW));
@@ -885,12 +914,13 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
         World world = event.getWorld();
         WorldCatalog.Profile profile = worlds.get(world.getUID());
         if (profile == null) {
+            worldContexts.put(world.getUID(), new WorldContext(world, List.of(), List.of()));
             return;
         }
         try {
             WorldContext context = buildWorldContext(world, profile);
             if (!profile.lastKnownName().equals(world.getName())) {
-                worlds.put(new WorldCatalog.Profile(profile.id(), world.getName(), profile.scenes(), profile.exclusions()));
+                worlds.put(new WorldCatalog.Profile(profile.id(), world.getName(), profile.automaticPatrol(), profile.scenes(), profile.exclusions()));
             }
             worldContexts.put(profile.id(), context);
         } catch (IOException | IllegalArgumentException exception) {
@@ -901,6 +931,12 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onWorldUnload(WorldUnloadEvent event) {
         revokeWorld(event.getWorld().getUID(), "该世界正在卸载");
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onChangedWorld(PlayerChangedWorldEvent event) {
+        Player camera = event.getPlayer();
+        if (handshakes.contains(camera.getUniqueId()) && cameraAllowed(camera)) sendWorldPolicy(camera);
     }
 
     private void reject(Player target, ObservationSessions.Session session, boolean blacklist) {
@@ -948,8 +984,8 @@ public final class DirectorPlugin extends JavaPlugin implements Listener, Plugin
                 || Math.abs(current.getPitch() - previous.getPitch()) >= 3) {
             recordActivity(event.getPlayer());
         }
-        if (sessions.forTarget(event.getPlayer().getUniqueId()) != null && !insidePatrolArea(current)) {
-            finish(sessions.forTarget(event.getPlayer().getUniqueId()), "目标进入排除区或离开允许世界", NORMAL_COOLDOWN_MILLIS);
+        if (sessions.forTarget(event.getPlayer().getUniqueId()) != null && !insideViewingArea(current)) {
+            finish(sessions.forTarget(event.getPlayer().getUniqueId()), "目标进入排除区或离开世界边界", NORMAL_COOLDOWN_MILLIS);
         }
     }
 

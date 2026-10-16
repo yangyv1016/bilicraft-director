@@ -38,6 +38,11 @@ public final class LocalSceneCache {
         if (bytes.length >= Integer.BYTES && ByteBuffer.wrap(bytes).getInt() == 0x42434149) {
             ByteBuffer.wrap(bytes).putInt(Protocol.MAGIC);
         }
+        // Version 5 adds world-policy packets; the version-4 scene-only snapshot layout is unchanged.
+        if (bytes.length >= 7 && ByteBuffer.wrap(bytes).getInt() == Protocol.MAGIC
+                && ByteBuffer.wrap(bytes).getShort(4) == 4 && bytes[6] == 3) {
+            ByteBuffer.wrap(bytes).putShort(4, (short) 5);
+        }
         Message message = Codec.decode(bytes);
         if (!(message instanceof Message.Snapshot snapshot) || !snapshot.players().isEmpty()) {
             throw new IOException("Scene cache must contain a snapshot without player data");

@@ -14,8 +14,8 @@ const cameraModeHelp = {
     PAN: "固定机位，缓慢左右扫视；运动幅度控制扫视范围。",
     STATIC: "保持固定机位，持续朝向目标。玩家走动时会转头追踪。"
 };
-const cameraNumberSettings = ["radius", "speed", "heightOffset", "motionAmplitude", "turnRateDegreesPerSecond"];
-const liveCameraIds = { radius: "Radius", speed: "Speed", heightOffset: "HeightOffset", motionAmplitude: "MotionAmplitude", turnRateDegreesPerSecond: "TurnRateDegreesPerSecond" };
+const cameraNumberSettings = ["radius", "speed", "heightY", "playerHeightOffset", "motionAmplitude", "turnRateDegreesPerSecond"];
+const liveCameraIds = { radius: "Radius", speed: "Speed", heightY: "HeightY", playerHeightOffset: "PlayerHeightOffset", motionAmplitude: "MotionAmplitude", turnRateDegreesPerSecond: "TurnRateDegreesPerSecond" };
 const commandNames = {
     start: "启动导播", stop: "停止导播", previous: "上一素材插播", queueSkip: "跳过当前",
     refresh: "拉取目标", mapRefresh: "拉取地图", mapSettings: "保存本机地图来源", show: "立即插播", camera: "调整运镜", ai: "保存 AI 配置", aiTest: "测试 AI 连接",
@@ -146,7 +146,7 @@ function updateAvailability() {
     for (const setting of cameraNumberSettings) element("live" + liveCameraIds[setting]).disabled = !available || cameraSavePending;
     const amplitudeUsed = ["AUTO", "DOLLY", "TRUCK", "CRANE", "PAN"].includes(element("liveCameraMode").value);
     element("liveMotionAmplitude").disabled ||= !amplitudeUsed;
-    element("liveMotionAmplitude").title = amplitudeUsed ? "运动范围受场景半径限制" : "当前模式不使用运动幅度；已保留给其它模式";
+    element("liveMotionAmplitude").title = amplitudeUsed ? "运动范围受镜头距离和世界边界约束" : "当前模式不使用运动幅度；已保留给其它模式";
     element("saveLiveCamera").disabled = !available || liveCameraSending || cameraSavePending || (state?.cameraSettingsSaved && !liveCameraDirty);
     element("saveQueueSettings").disabled = !available || busy || !queueSettingsDirty;
     const canConfigureMap = Boolean(available && state.connected && state.world && state.server);
@@ -320,9 +320,12 @@ function applyState(next) {
         ? "由本人发起同世界场景传送；到位并加载后开始运镜，失败或超时跳过"
         : "当前客户端尚未接入场景传送";
     element("targetSource").textContent = !next.connected ? "保留最后同步视图"
-        : next.allowed ? "当前世界 · 已授权候选" : "本地模式 · 景点、巡游与队列可用 · 玩家跟随未授权";
+        : next.patrol.pending ? "正在同步巡游范围 · 手动选点可用"
+            : !next.patrol.automatic ? "当前世界仅手动选点 · 自动巡游、本地及AI补点暂停"
+            : next.allowed ? "当前世界 · 服务端数据已连接" : "本地模式 · 景点、巡游与队列可用 · 玩家跟随未授权";
     element("cameraActual").textContent = "当前：" + cameraModeNames[next.settings.mode] + " · 距离 " + next.settings.radius
-        + " 格 · 速度 " + next.settings.speed + " 格 / 秒 · 高度 +" + next.settings.heightOffset
+        + " 格 · 速度 " + next.settings.speed + " 格 / 秒 · 场景 Y " + next.settings.heightY
+        + " · 跟拍高度 +" + next.settings.playerHeightOffset
         + " 格 · 幅度 " + next.settings.motionAmplitude + " 格 · 转向 " + next.settings.turnRateDegreesPerSecond + " 度 / 秒";
     if (!cameraDirty && !element("cameraForm").contains(document.activeElement)) loadCameraValues();
     if (!liveCameraDirty && !liveCameraSending) {
@@ -336,7 +339,8 @@ function applyState(next) {
         element("entryDuration").value = selectedTarget?.kind === "PLAYER" ? "" : next.queue.settings.sceneDurationSeconds;
     }
     element("queueSettingsActual").textContent = "当前：自动补足" + (next.queue.settings.autoFill ? "开启" : "关闭")
-        + " · 缓存 " + next.queue.settings.bufferSize + " 项 · 场景默认 " + next.queue.settings.sceneDurationSeconds + " 秒";
+        + " · 缓存 " + next.queue.settings.bufferSize + " 项 · 场景默认 " + next.queue.settings.sceneDurationSeconds + " 秒"
+        + (next.patrol.automatic ? "" : " · 当前世界仅手动，自动补点暂停");
     renderQueue();
     if (!aiInitialized) {
         currentProvider = next.ai.provider;
@@ -452,7 +456,9 @@ function renderQueue() {
     element("pendingCount").textContent = String(queue.pending.length);
     element("queueCapacity").textContent = queue.pending.length + " / 64";
     element("queueStatus").textContent = queue.status;
-    element("queueAutoSummary").textContent = queue.settings.autoFill ? "自动补足 · 前向 " + queue.settings.bufferSize + " 项" : "自动补足已关闭";
+    element("queueAutoSummary").textContent = state.patrol.pending ? "正在同步巡游范围 · 自动补足暂停"
+        : !state.patrol.automatic ? "当前世界仅手动 · 自动补足暂停"
+        : queue.settings.autoFill ? "自动补足 · 前向 " + queue.settings.bufferSize + " 项" : "自动补足已关闭";
     element("queuePosition").max = queue.pending.length + 1;
     if (document.activeElement !== element("queuePosition") && Number(element("queuePosition").value) > queue.pending.length + 1) {
         element("queuePosition").value = queue.pending.length + 1;
@@ -619,7 +625,8 @@ function renderTargets() {
         item.querySelector(".target-name").textContent = target.name;
         item.querySelector(".target-kind").textContent = kindNames[target.kind];
         item.querySelector(".target-item-bottom").firstElementChild.textContent = target.label;
-        item.querySelector(".target-item-bottom").lastElementChild.textContent = target.available ? "可展示" : "暂不可用";
+        item.querySelector(".target-item-bottom").lastElementChild.textContent = !target.available ? "暂不可用"
+            : target.automaticAvailable ? "可展示" : "可手动展示";
         item.querySelector(".target-select").title = "查看 " + target.name + " · " + target.world;
         item.querySelectorAll("[data-library-add]").forEach((button) => {
             button.disabled = !canQueueTarget(target);
@@ -669,7 +676,8 @@ function renderSelection() {
         : !state.targets.some((candidate) => candidate.id === target.id) ? "此目标已不在当前候选中，请重新拉取。"
             : !target.available ? "当前目标不可展示；请检查当前世界、边界、排除区或玩家授权。"
                 : target.kind === "PLAYER" ? "发起后先私密预告 15 秒；玩家可拒绝或加入长期黑名单。"
-                    : "远处或未加载场景由本账号发起传送，到位并加载后开始运镜。";
+                    : (target.automaticAvailable ? "" : "仅手动选择，不参与自动或AI补点。")
+                        + "远处或未加载场景由本账号发起传送，到位并加载后开始运镜。";
     element("entryDurationUnit").textContent = "秒";
     element("entryDuration").min = target?.kind === "PLAYER" ? "180" : "30";
     element("entryDuration").max = target?.kind === "PLAYER" ? "480" : "600";
@@ -690,7 +698,7 @@ function loadCameraValues() {
 function renderLiveCameraValues() {
     for (const setting of cameraNumberSettings) {
         element("live" + liveCameraIds[setting] + "Value").textContent = element("live" + liveCameraIds[setting]).value
-            + (setting === "speed" ? " 格/秒" : setting === "turnRateDegreesPerSecond" ? " 度/秒" : " 格");
+            + (setting === "heightY" ? "" : setting === "speed" ? " 格/秒" : setting === "turnRateDegreesPerSecond" ? " 度/秒" : " 格");
     }
 }
 

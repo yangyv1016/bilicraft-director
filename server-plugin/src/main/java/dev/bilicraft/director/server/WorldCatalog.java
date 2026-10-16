@@ -1,5 +1,6 @@
 package dev.bilicraft.director.server;
 
+import dev.bilicraft.director.protocol.Protocol;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -16,7 +17,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/** Explicit UUID allowlist; an existing empty catalog must never trigger legacy re-import. */
+/** UUID world metadata with an explicit automatic-patrol flag; removing patrol retains privacy rules. */
 final class WorldCatalog {
     private final Path file;
     private final Map<UUID, Profile> worlds = new LinkedHashMap<>();
@@ -28,11 +29,13 @@ final class WorldCatalog {
             return;
         }
         YamlConfiguration configuration = new YamlConfiguration();
+        boolean legacy;
         try {
             configuration.load(file.toFile());
-            if (!Integer.valueOf(1).equals(configuration.get("version"))
+            legacy = Integer.valueOf(1).equals(configuration.get("version"));
+            if ((!legacy && !Integer.valueOf(2).equals(configuration.get("version")))
                     || !configuration.getKeys(false).equals(Set.of("version", "worlds"))) {
-                throw new IllegalArgumentException("worlds.yml 必须使用 version: 1 和 worlds 映射");
+                throw new IllegalArgumentException("worlds.yml 必须使用 version: 2 和 worlds 映射（兼容迁移 version: 1）");
             }
             ConfigurationSection section = configuration.getConfigurationSection("worlds");
             if (section == null) {
@@ -44,11 +47,15 @@ final class WorldCatalog {
                     throw new IllegalArgumentException("世界 UUID 必须为完整规范格式：" + key);
                 }
                 ConfigurationSection entry = section.getConfigurationSection(key);
-                if (entry == null || !entry.getKeys(false).equals(Set.of("name", "scenes", "exclude-regions"))
-                        || !(entry.get("name") instanceof String name)) {
-                    throw new IllegalArgumentException("世界 " + key + " 必须且仅包含 name/scenes/exclude-regions");
+                Set<String> fields = legacy ? Set.of("name", "scenes", "exclude-regions")
+                        : Set.of("name", "automatic-patrol", "scenes", "exclude-regions");
+                if (entry == null || !entry.getKeys(false).equals(fields)
+                        || !(entry.get("name") instanceof String name)
+                        || (!legacy && !(entry.get("automatic-patrol") instanceof Boolean))) {
+                    throw new IllegalArgumentException("世界 " + key + " 必须且仅包含 name/automatic-patrol/scenes/exclude-regions，automatic-patrol 必须为布尔值");
                 }
-                Profile profile = new Profile(id, name, SceneConfiguration.parseEntries(entry.get("scenes")),
+                Profile profile = new Profile(id, name, legacy || entry.getBoolean("automatic-patrol"),
+                        SceneConfiguration.parseEntries(entry.get("scenes")),
                         SceneConfiguration.parseExclusions(entry.get("exclude-regions")));
                 if (worlds.values().stream().anyMatch(existing -> existing.lastKnownName.equals(name))) {
                     throw new IllegalArgumentException("世界 name 重复：" + name);
@@ -58,9 +65,10 @@ final class WorldCatalog {
                 }
             }
         } catch (InvalidConfigurationException | IllegalArgumentException exception) {
-            throw new IOException("世界允许名单读取失败：" + file, exception);
+            throw new IOException("世界巡游配置读取失败：" + file, exception);
         }
         initialized = true;
+        if (legacy) save();
     }
 
     boolean initialized() {
@@ -93,25 +101,20 @@ final class WorldCatalog {
         }
     }
 
-    void remove(UUID id) throws IOException {
-        Profile previous = worlds.remove(id);
-        try {
-            save();
-        } catch (IOException exception) {
-            if (previous != null) {
-                worlds.put(id, previous);
-            }
-            throw exception;
-        }
+    void setAutomaticPatrol(UUID id, boolean enabled) throws IOException {
+        Profile profile = worlds.get(id);
+        if (profile == null) throw new IllegalArgumentException("世界尚未登记：" + id);
+        put(new Profile(profile.id, profile.lastKnownName, enabled, profile.scenes, profile.exclusions));
     }
 
     void save() throws IOException {
         YamlConfiguration configuration = new YamlConfiguration();
-        configuration.set("version", 1);
+        configuration.set("version", 2);
         ConfigurationSection section = configuration.createSection("worlds");
         for (Profile profile : worlds.values()) {
             ConfigurationSection entry = section.createSection(profile.id.toString());
             entry.set("name", profile.lastKnownName);
+            entry.set("automatic-patrol", profile.automaticPatrol);
             entry.set("scenes", profile.scenes.stream().map(scene -> {
                 Map<String, Object> values = new LinkedHashMap<>();
                 values.put("id", scene.id());
@@ -148,7 +151,7 @@ final class WorldCatalog {
         }
     }
 
-    record Profile(UUID id, String lastKnownName, List<SceneConfiguration.ConfiguredScene> scenes,
+    record Profile(UUID id, String lastKnownName, boolean automaticPatrol, List<SceneConfiguration.ConfiguredScene> scenes,
                    List<SceneConfiguration.Bounds> exclusions) {
         Profile {
             if (lastKnownName.isBlank() || !lastKnownName.equals(lastKnownName.strip())
@@ -159,6 +162,9 @@ final class WorldCatalog {
             }
             scenes = List.copyOf(scenes);
             exclusions = List.copyOf(exclusions);
+            if (exclusions.size() > Protocol.MAX_MAP_EXCLUSIONS) {
+                throw new IllegalArgumentException("每个世界最多 64 个排除区，不能下发不完整的隐私规则");
+            }
         }
     }
 }

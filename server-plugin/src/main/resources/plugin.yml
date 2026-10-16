@@ -8,7 +8,7 @@ authors: [BiliCraft]
 softdepend: [LuckPerms]
 commands:
   director:
-    description: 管理导播观察偏好、黑名单与世界允许名单
+    description: 管理导播观察偏好、黑名单与自动巡游世界名单
     usage: /director stop | blacklist on/off | status
 permissions:
   bilicraftdirector.data.read:
@@ -18,7 +18,7 @@ permissions:
     description: 允许管理员为指定玩家添加或移除长期观察黑名单
     default: op
   bilicraftdirector.worlds.manage:
-    description: 允许管理员查看、添加或移除导播世界允许名单
+    description: 允许管理员查看、添加或移除导播自动巡游世界名单（不限制手动展示）
     default: op
   bilicraftdirector.map.manage:
     description: 允许管理员配置、查看或清除客户端直连的 Dynmap 外链映射

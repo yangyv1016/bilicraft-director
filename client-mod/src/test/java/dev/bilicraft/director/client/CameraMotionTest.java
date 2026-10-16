@@ -19,6 +19,7 @@ class CameraMotionTest {
     private CameraSettings settings(CameraMotion.Mode mode) {
         CameraSettings settings = new CameraSettings(directory.resolve("camera.properties"));
         settings.mode = mode;
+        settings.heightY = camera.y();
         return settings;
     }
 
@@ -70,12 +71,12 @@ class CameraMotionTest {
     }
 
     @Test
-    void orbitUsesSceneRadiusAsUpperLimitAndHeightSetting() {
+    void orbitUsesConfiguredRadiusAndAbsoluteYInsteadOfMarkerFootprint() {
         CameraSettings settings = settings(CameraMotion.Mode.ORBIT);
-        settings.heightOffset = 9;
+        settings.heightY = 89;
         CameraMotion.Subject smallScene = new CameraMotion.Subject("small", center, 0, false, false, false, 6);
         CameraMotion.Shot shot = new CameraMotion().sample(smallScene, camera, settings);
-        assertEquals(6, Math.hypot(shot.position().x(), shot.position().z()), 1e-9);
+        assertEquals(12, Math.hypot(shot.position().x(), shot.position().z()), 1e-9);
         assertEquals(89, shot.position().y());
     }
 
@@ -113,7 +114,7 @@ class CameraMotionTest {
     }
 
     @Test
-    void horizontalMovementStaysWithinSceneRadiusEvenWithMaximumAmplitude() {
+    void horizontalMovementStaysWithinConfiguredRadiusEvenWithMaximumAmplitude() {
         CameraMotion.Subject smallScene = new CameraMotion.Subject("small", center, 0, false, false, false, 6);
         for (CameraMotion.Mode mode : CameraMotion.Mode.values()) {
             CameraMotion motion = new CameraMotion();
@@ -121,7 +122,75 @@ class CameraMotionTest {
             settings.motionAmplitude = 24;
             for (int tick = 0; tick < 2_000; tick++) {
                 CameraMotion.Point point = motion.sample(smallScene, camera, settings).position();
-                assertTrue(Math.hypot(point.x(), point.z()) <= 6 + 1e-9, mode.name());
+                assertTrue(Math.hypot(point.x(), point.z()) <= settings.radius + 1e-9, mode.name());
+            }
+        }
+    }
+
+    @Test
+    void smallMarkerCanUseA256BlockCameraRadiusAtAbsoluteY256() {
+        CameraSettings settings = settings(CameraMotion.Mode.ORBIT);
+        settings.radius = 256;
+        settings.heightY = 256;
+        CameraMotion.Subject marker = new CameraMotion.Subject("marker", center, 0, false, false, false, 12);
+        CameraMotion.Shot shot = new CameraMotion().sample(marker, camera, settings);
+        assertEquals(256, Math.hypot(shot.position().x(), shot.position().z()), 1e-9);
+        assertEquals(256, shot.position().y());
+    }
+
+    @Test
+    void extendedSceneSettingsKeepPlayersWithinTheExistingFollowEnvelope() {
+        CameraMotion.Subject player = new CameraMotion.Subject("player", center, 30, true, false, true, 256);
+        for (CameraMotion.Mode mode : CameraMotion.Mode.values()) {
+            CameraSettings settings = settings(mode);
+            settings.radius = 256;
+            settings.heightY = 256;
+            settings.playerHeightOffset = 12;
+            settings.motionAmplitude = 24;
+            CameraMotion motion = new CameraMotion();
+            for (int tick = 0; tick < 2_000; tick++) {
+                CameraMotion.Point point = motion.sample(player, camera, settings).position();
+                assertTrue(Math.hypot(point.x(), point.z()) <= 24 + 1e-9, mode.name());
+                double maximumHeight = mode == CameraMotion.Mode.CRANE ? 18 : 12;
+                assertTrue(point.y() - center.y() <= maximumHeight + 1e-9, mode.name());
+            }
+        }
+    }
+
+    @Test
+    void sceneAndLocalSubjectsAtDifferentElevationsUseTheSameAbsoluteCameraY() {
+        for (CameraMotion.Mode mode : CameraMotion.Mode.values()) {
+            CameraSettings settings = settings(mode);
+            settings.heightY = 120;
+            CameraMotion lowMotion = new CameraMotion();
+            CameraMotion highMotion = new CameraMotion();
+            CameraMotion.Subject low = new CameraMotion.Subject("scene:low", new CameraMotion.Point(0, 20, 0),
+                    0, false, false, false, 12);
+            CameraMotion.Subject high = new CameraMotion.Subject("local:high", new CameraMotion.Point(0, 180, 0),
+                    0, false, false, false, 12);
+            for (int tick = 0; tick < 100; tick++) {
+                double lowY = lowMotion.sample(low, camera, settings).position().y();
+                double highY = highMotion.sample(high, camera, settings).position().y();
+                assertEquals(lowY, highY, 1e-9, mode.name());
+                if (mode != CameraMotion.Mode.CRANE) {
+                    assertEquals(120, lowY, 1e-9, mode.name());
+                }
+            }
+        }
+    }
+
+    @Test
+    void followingPlayersTracksTheirElevationWithAnIndependentRelativeOffset() {
+        for (CameraMotion.Mode mode : CameraMotion.Mode.values()) {
+            if (mode == CameraMotion.Mode.CRANE) continue;
+            CameraSettings settings = settings(mode);
+            settings.heightY = 256;
+            settings.playerHeightOffset = 4;
+            CameraMotion motion = new CameraMotion();
+            for (double y : new double[]{40, 80, 50}) {
+                CameraMotion.Subject player = new CameraMotion.Subject("player", new CameraMotion.Point(0, y, 0),
+                        30, true, false, true, 12);
+                assertEquals(y + 4, motion.sample(player, camera, settings).position().y(), 1e-9, mode.name());
             }
         }
     }
