@@ -94,7 +94,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private List<SceneView> serverScenes = List.of();
     private List<SceneView> importedScenes = List.of();
     private List<DynmapRegion> mapRegions = List.of();
-    private DynmapRegion currentRegion;
     private boolean mapBootstrapPending;
     private boolean mapLoaded;
     private boolean mapMetadataPending;
@@ -216,7 +215,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             targetSwitchDirection = 0;
             activeScene = null;
             sceneArrival = null;
-            showcaseQueue.clear();
+            showcaseQueue.resetSession();
             lastQueueRefreshAttempt = 0;
             cachedScenes = List.of();
             sceneCacheFailed = false;
@@ -258,7 +257,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             cachedScenes = List.of();
             activeScene = null;
             sceneArrival = null;
-            showcaseQueue.clear();
+            showcaseQueue.resetSession();
             lastSelectedTarget = null;
             snapshotPending = false;
             snapshotWorldKey = null;
@@ -287,10 +286,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 context.fill(0, 0, context.getScaledWindowWidth(), context.getScaledWindowHeight(), alpha << 24);
             }
         });
-        HudElementRegistry.addLast(Identifier.of("bilicraftdirector", "region"), (context, tickCounter) -> {
-            if (!running || currentRegion == null) return;
+        HudElementRegistry.addLast(Identifier.of("bilicraftdirector", "target_name"), (context, tickCounter) -> {
+            ShowcaseQueue.Entry current = showcaseQueue.current();
+            if (!running || current == null) return;
             MinecraftClient client = MinecraftClient.getInstance();
-            String label = currentRegion.name();
+            String label = current.target().name();
             context.fill(6, 6, client.textRenderer.getWidth(label) + 18, 24, 0x99000000);
             context.drawTextWithShadow(client.textRenderer, label, 12, 11, 0xFFFFFFFF);
         });
@@ -299,7 +299,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private void tick(MinecraftClient client) {
         synchronizeWorld(client);
         if (client.world != null && client.player != null) {
-            currentRegion = DynmapRegion.locate(mapRegions, currentWorldKey, client.player.getX(), client.player.getZ());
             if (mapBootstrapPending && client.getNetworkHandler() != null && client.currentScreen == null
                     && client.getOverlay() == null) {
                 mapBootstrapPending = false;
@@ -493,7 +492,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 mapGeneration++;
                 importedScenes = List.of();
                 mapRegions = List.of();
-                currentRegion = null;
                 mapLoaded = false;
                 mapSceneCount = 0;
                 mapFetchedAt = 0;
@@ -615,7 +613,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         serverScenes = List.of();
         importedScenes = List.of();
         mapRegions = List.of();
-        currentRegion = null;
         mapBootstrapPending = false;
         mapLoaded = false;
         mapMetadataPending = false;
@@ -823,19 +820,18 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         }
         boolean remoteAllowed = allowed && !businessRequestCancelled && now - lastMessage <= 8_000;
         ArrayList<StrategyPrompt.Candidate> candidates = new ArrayList<>();
+        ArrayList<ShowcaseTarget> eligible = new ArrayList<>();
         for (ShowcaseTarget target : targets) {
-            if ((target instanceof ShowcaseTarget.Player && !remoteAllowed) || !automaticTargetAvailable(target)
-                    || !showcaseQueue.automaticCandidateAvailable(target.id(), now)) {
-                continue;
+            if ((!(target instanceof ShowcaseTarget.Player) || remoteAllowed) && automaticTargetAvailable(target)) {
+                eligible.add(target);
             }
+        }
+        for (ShowcaseTarget target : showcaseQueue.sampleAutomaticCandidates(eligible, StrategyPrompt.MAX_CANDIDATES, now)) {
             StrategyPrompt.Kind kind = target instanceof ShowcaseTarget.Player ? StrategyPrompt.Kind.PLAYER
                     : StrategyPrompt.Kind.valueOf(((ShowcaseTarget.Scene) target).view().kind().name());
             String label = target.name().codePoints().filter(point -> !Character.isISOControl(point))
                     .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString();
             candidates.add(new StrategyPrompt.Candidate(target.id(), kind, kind == StrategyPrompt.Kind.PLAYER ? 20 : 80, label));
-            if (candidates.size() == StrategyPrompt.MAX_CANDIDATES) {
-                break;
-            }
         }
         int missing = queueSettings.autoFill ? Math.max(0, queueSettings.bufferSize - showcaseQueue.pending().size()) : 0;
         return StrategyPrompt.build(candidates, missing, occupied);
@@ -984,6 +980,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     status = sceneArrival.teleport() ? "前往场景超时，已跳过；请检查本人 tp 权限或区块加载"
                             : "平滑前往场景超时，已跳过；请检查路线边界与区块加载";
                 }
+            }
+            if (targetValid && activeScene != null && sceneArrival == null && !paused) {
+                showcaseQueue.markPlayed(current.target().id());
             }
             if (!targetValid || activeScene == null || showcaseQueue.tickScene(now, paused || arrivingThisTick)) {
                 if (!targetValid || activeScene == null) {
@@ -1440,6 +1439,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 endObservation("玩家已离开可跟随范围或进入排除区");
                 return;
             }
+            showcaseQueue.markPlayed("player:" + requestedTarget);
             Vec3d center = target.getEntityPos().add(0, 1.2, 0);
             if (previousTargetPosition != null
                     && target.getEntityPos().subtract(previousTargetPosition).horizontalLengthSquared() > 0.0001) {
@@ -1641,7 +1641,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 || showcaseQueue.current().source() == ShowcaseQueue.Source.AUTO))));
         state.addProperty("sceneArriving", sceneArrival != null);
         state.addProperty("sceneTravelMode", sceneArrival == null ? null : sceneArrival.teleport() ? "TELEPORT" : "FLY");
-        state.addProperty("region", currentRegion == null ? null : currentRegion.name());
         JsonObject observation = new JsonObject();
         observation.addProperty("state", remoteAllowed ? observeState.name() : ObserveState.ENDED.name());
         observation.addProperty("targetId", !remoteAllowed || requestedTarget == null ? null : requestedTarget.toString());
@@ -1904,7 +1903,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     mapLoaded = false;
                     importedScenes = List.of();
                     mapRegions = List.of();
-                    currentRegion = null;
                     mapBootstrapPending = false;
                     mapSceneCount = 0;
                     mapFetchedAt = 0;

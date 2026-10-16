@@ -11,6 +11,106 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ShowcaseQueueTest {
     @Test
+    void playedTargetsStayOutOfLocalAndAiFillsUntilTheNextLoginButManualRepeatsRemainAllowed() {
+        ShowcaseQueue queue = new ShowcaseQueue(new Random(4));
+        ShowcaseTarget scene = scene("played");
+        ShowcaseTarget player = player();
+        queue.start(queue.manualEntry(scene, 120), 0);
+        queue.markPlayed(scene.id());
+        queue.finishCurrent();
+        queue.start(queue.manualEntry(player, 180), 0);
+        queue.markPlayed(player.id());
+        queue.clear(); // Stopping or changing worlds must not reset this login's played list.
+        assertFalse(queue.automaticCandidateAvailable(scene.id(), 86_400_000));
+        assertFalse(queue.automaticCandidateAvailable(player.id(), 86_400_000));
+        queue.fill(List.of(scene, player), 4, 120, 86_400_000);
+        assertTrue(queue.pending().isEmpty());
+        assertEquals(0, queue.appendAutomatic(List.of(scene, player), 4, 120, 86_400_000));
+        queue.add(scene, 0, 60);
+        queue.start(queue.poll(), 86_400_000);
+        assertEquals(scene, queue.current().target());
+        assertEquals(ShowcaseQueue.Source.MANUAL, queue.current().source());
+        queue.resetSession();
+        assertNull(queue.current());
+        assertTrue(queue.pending().isEmpty());
+        assertTrue(queue.automaticCandidateAvailable(scene.id(), 86_400_001));
+        assertTrue(queue.automaticCandidateAvailable(player.id(), 86_400_001));
+        assertEquals(2, queue.appendAutomatic(List.of(scene, player), 4, 120, 86_400_001));
+    }
+
+    @Test
+    void failedArrivalOrPlayerNoticeDoesNotCountAsPlayed() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        for (ShowcaseTarget target : List.of(scene("unreached"), player())) {
+            queue.start(queue.manualEntry(target, queue.defaultDuration(target, 120)), 0);
+            queue.finishCurrent();
+            assertTrue(queue.automaticCandidateAvailable(target.id(), 1));
+        }
+    }
+
+    @Test
+    void markingPlayedRemovesOnlyAutomaticCopiesAndRejectsLateAiChoices() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget target = scene("just-played");
+        queue.fill(List.of(target), 4, 120, 0);
+        queue.add(target, 0, 60);
+        ShowcaseQueue.Entry manual = queue.pending().getFirst();
+        queue.markPlayed(target.id());
+        assertEquals(List.of(manual), queue.pending());
+        assertEquals(0, queue.appendAutomatic(List.of(target), 4, 120, 1));
+        queue.markPlayed(target.id());
+        assertEquals(List.of(manual), queue.pending());
+    }
+
+    @Test
+    void sameSceneIdInAnotherWorldIsStillAnUnplayedTarget() {
+        ShowcaseQueue queue = new ShowcaseQueue();
+        ShowcaseTarget overworld = scene("station");
+        ShowcaseTarget nether = new ShowcaseTarget.Scene(new Message.SceneView("station", "station", Message.SceneKind.VIEWPOINT,
+                "minecraft:the_nether", 0, 80, 0, 6));
+        queue.markPlayed(overworld.id());
+        assertFalse(queue.automaticCandidateAvailable(overworld.id(), 0));
+        assertTrue(queue.automaticCandidateAvailable(nether.id(), 0));
+    }
+
+    @Test
+    void randomRefillVisitsEveryAvailableSceneOnceThenStopsInsteadOfRepeating() {
+        ShowcaseQueue queue = new ShowcaseQueue(new Random(42));
+        List<ShowcaseTarget> candidates = java.util.stream.IntStream.range(0, 40)
+                .mapToObj(index -> scene("scene-" + index)).toList();
+        java.util.ArrayList<String> played = new java.util.ArrayList<>();
+        queue.fill(candidates, 4, 120, 0);
+        while (queue.peek() != null) {
+            queue.start(queue.poll(), 0);
+            played.add(queue.current().target().id());
+            queue.markPlayed(queue.current().target().id());
+            queue.finishCurrent();
+            queue.fill(candidates, 4, 120, 0);
+        }
+        assertEquals(40, played.size());
+        assertEquals(40, new java.util.HashSet<>(played).size());
+        assertNotEquals(candidates.stream().map(ShowcaseTarget::id).toList(), played);
+        assertTrue(queue.sampleAutomaticCandidates(candidates, 12, 0).isEmpty());
+    }
+
+    @Test
+    void aiOffersSampleTheWholeEligiblePoolRatherThanTheFirstTwelveNames() {
+        ShowcaseQueue queue = new ShowcaseQueue(new Random(42));
+        List<ShowcaseTarget> candidates = java.util.stream.IntStream.range(0, 100)
+                .mapToObj(index -> scene("scene-" + index)).toList();
+        queue.markPlayed(candidates.getFirst().id());
+        queue.add(candidates.get(1), 0, 120);
+        List<ShowcaseTarget> offered = queue.sampleAutomaticCandidates(candidates, 12, 0);
+        assertEquals(12, offered.size());
+        assertEquals(12, offered.stream().map(ShowcaseTarget::id).distinct().count());
+        assertTrue(offered.stream().anyMatch(target -> candidates.indexOf(target) >= 12));
+        assertFalse(offered.contains(candidates.getFirst()));
+        assertFalse(offered.contains(candidates.get(1)));
+        assertNotEquals(offered, queue.sampleAutomaticCandidates(candidates, 12, 0));
+        assertEquals(1, queue.pending().size(), "offering candidates must not modify the queue");
+    }
+
+    @Test
     void waitingForPlayerServiceDoesNotConsumeTheHeadEntry() {
         ShowcaseQueue queue = new ShowcaseQueue(new Random(4));
         assertNull(queue.peek());

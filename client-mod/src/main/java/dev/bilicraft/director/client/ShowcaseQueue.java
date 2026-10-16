@@ -25,6 +25,7 @@ public final class ShowcaseQueue {
     private final ArrayList<Entry> pending = new ArrayList<>();
     private final Map<String, Long> suppressedUntil = new HashMap<>();
     private final Map<String, Long> automaticSuppressedUntil = new HashMap<>();
+    private final HashSet<String> playedTargetIds = new HashSet<>();
     private Entry current;
     private long remainingMillis;
     private long lastSceneTick;
@@ -148,17 +149,20 @@ public final class ShowcaseQueue {
         }
         suppressedUntil.values().removeIf(until -> until <= now);
         automaticSuppressedUntil.values().removeIf(until -> until <= now);
-        HashSet<String> occupied = new HashSet<>();
-        if (current != null) {
-            occupied.add(current.target().id());
+        int missing = bufferSize - pending.size();
+        if (missing <= 0) return;
+        for (ShowcaseTarget target : sampleAutomaticCandidates(candidates, missing, now)) {
+            pending.add(new Entry(UUID.randomUUID().toString(), target, Source.AUTO,
+                    defaultDuration(target, sceneDurationSeconds)));
         }
-        for (Entry entry : pending) {
-            occupied.add(entry.target().id());
-        }
+    }
+
+    /** Shared random pool for local fills and AI offers, excluding queued and already played targets. */
+    public List<ShowcaseTarget> sampleAutomaticCandidates(List<ShowcaseTarget> candidates, int limit, long now) {
+        if (limit < 1 || limit > 12) throw new IllegalArgumentException("Candidate limit must be 1..12");
         LinkedHashMap<String, ShowcaseTarget> unique = new LinkedHashMap<>();
         for (ShowcaseTarget target : candidates) {
-            if (!occupied.contains(target.id()) && !isSuppressed(target.id(), now)
-                    && automaticSuppressedUntil.getOrDefault(target.id(), 0L) <= now) {
+            if (automaticCandidateAvailable(target.id(), now)) {
                 unique.putIfAbsent(target.id(), target);
             }
         }
@@ -167,17 +171,18 @@ public final class ShowcaseQueue {
         for (ShowcaseTarget target : unique.values()) {
             (target instanceof ShowcaseTarget.Player ? players : scenes).add(target);
         }
-        while (pending.size() < bufferSize && (!scenes.isEmpty() || !players.isEmpty())) {
+        ArrayList<ShowcaseTarget> selected = new ArrayList<>();
+        while (selected.size() < limit && (!scenes.isEmpty() || !players.isEmpty())) {
             boolean chooseScene = players.isEmpty() || (!scenes.isEmpty() && random.nextDouble() < 0.8);
             ArrayList<ShowcaseTarget> pool = chooseScene ? scenes : players;
             ShowcaseTarget target = pool.remove(random.nextInt(pool.size()));
-            pending.add(new Entry(UUID.randomUUID().toString(), target, Source.AUTO,
-                    defaultDuration(target, sceneDurationSeconds)));
+            selected.add(target);
         }
+        return List.copyOf(selected);
     }
 
     public boolean automaticCandidateAvailable(String targetId, long now) {
-        return (current == null || !current.target().id().equals(targetId))
+        return !playedTargetIds.contains(targetId) && (current == null || !current.target().id().equals(targetId))
                 && pending.stream().noneMatch(entry -> entry.target().id().equals(targetId))
                 && !isSuppressed(targetId, now) && automaticSuppressedUntil.getOrDefault(targetId, 0L) <= now;
     }
@@ -269,6 +274,18 @@ public final class ShowcaseQueue {
 
     public void suppressAutomatic(String targetId, long until) {
         automaticSuppressedUntil.merge(targetId, until, Math::max);
+    }
+
+    /** Called after a scene arrives or a permitted player actually enters the shot, never for a failed request. */
+    public void markPlayed(String targetId) {
+        if (playedTargetIds.add(targetId)) {
+            pending.removeIf(entry -> entry.source() == Source.AUTO && entry.target().id().equals(targetId));
+        }
+    }
+
+    public void resetSession() {
+        clear();
+        playedTargetIds.clear();
     }
 
     public void clear() {

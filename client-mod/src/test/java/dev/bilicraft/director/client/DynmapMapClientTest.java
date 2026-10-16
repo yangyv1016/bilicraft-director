@@ -201,6 +201,87 @@ class DynmapMapClientTest {
     }
 
     @Test
+    void alternateMinecraftColorsAndStylesAreRemovedWithoutEatingOrdinaryAmpersands() throws Exception {
+        body.set("""
+                {"sets":{"s":{"markers":{"island":{"x":5,"y":70,"z":5,
+                "label":"<b>&amp;1翡翠岛</b> &L港口&r &amp; 广场 §a北岸 &z保留"}},
+                "areas":{"town":{"x":[0,10,10,0],"z":[0,0,10,10],"ytop":80,"ybottom":60,
+                "label":"&6新赫洛堡&A新区&N码头&O街道&M旧址&K路牌&R"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals("翡翠岛 港口 & 广场 北岸 &z保留", result.scenes().getFirst().name());
+        assertEquals("新赫洛堡新区码头街道旧址路牌", result.scenes().getLast().name());
+        assertEquals(result.scenes().getLast().name(), result.regions().getFirst().name());
+    }
+
+    @Test
+    void colorOnlyLabelsAreSkippedAndNameLengthIsLimitedAfterRemovingFormatting() throws Exception {
+        body.set("""
+                {"sets":{"s":{"markers":{
+                "empty":{"x":5,"y":70,"z":5,"label":"&1&L&r"},
+                "long":{"x":6,"y":70,"z":6,"label":"%s"}}}}}
+                """.formatted("&1岛".repeat(50)).getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(1, result.scenes().size());
+        assertEquals("岛".repeat(48), result.scenes().getFirst().name());
+        assertTrue(result.note().contains("跳过 1"));
+    }
+
+    @Test
+    void sameNameNearbyMarkersMergeAt128BlocksButDistantPlacesAndDifferentNamesRemain() throws Exception {
+        body.set("""
+                {"sets":{"s":{"markers":{
+                "a":{"x":0,"y":70,"z":0,"label":"&1翡翠岛"},
+                "b":{"x":128,"y":70,"z":0,"label":"翡翠岛"},
+                "far":{"x":1000,"y":70,"z":0,"label":"翡翠岛"},
+                "other":{"x":0,"y":70,"z":0,"label":"码头"},
+                "edge1":{"x":0,"y":70,"z":0,"label":"远岸"},
+                "edge2":{"x":128.01,"y":70,"z":0,"label":"远岸"},
+                "diag1":{"x":0,"y":70,"z":0,"label":"对角"},
+                "diag2":{"x":100,"y":70,"z":100,"label":"对角"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(7, result.scenes().size());
+        assertEquals(2, result.scenes().stream().filter(scene -> scene.name().equals("翡翠岛")).count());
+        assertTrue(result.scenes().stream().anyMatch(scene -> scene.name().equals("翡翠岛") && scene.x() == 1000));
+        assertTrue(result.scenes().stream().anyMatch(scene -> scene.name().equals("码头")));
+        assertEquals(2, result.scenes().stream().filter(scene -> scene.name().equals("远岸")).count());
+        assertEquals(2, result.scenes().stream().filter(scene -> scene.name().equals("对角")).count());
+        assertTrue(result.note().contains("合并 1"));
+    }
+
+    @Test
+    void filteringSceneCandidatesKeepsAllAreaPolygonsAndDistinctSceneKinds() throws Exception {
+        body.set("""
+                {"sets":{"s":{"markers":{"point":{"x":5,"y":70,"z":5,"label":"城区"}},"areas":{
+                "a":{"x":[0,10,10,0],"z":[0,0,10,10],"ytop":80,"ybottom":60,"label":"城区"},
+                "b":{"x":[10,20,20,10],"z":[0,0,10,10],"ytop":80,"ybottom":60,"label":"城区"}}}}}
+                """.getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result result = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(2, result.scenes().size());
+        assertEquals(1, result.scenes().stream().filter(scene -> scene.kind() == Message.SceneKind.VIEWPOINT).count());
+        assertEquals(1, result.scenes().stream().filter(scene -> scene.kind() == Message.SceneKind.AREA).count());
+        assertEquals(2, result.regions().size());
+        assertNotNull(DynmapRegion.locate(result.regions(), WORLD, 5, 5));
+        assertNotNull(DynmapRegion.locate(result.regions(), WORLD, 15, 5));
+        assertTrue(result.regions().stream().anyMatch(region -> region.id().equals(result.scenes().getLast().id())));
+    }
+
+    @Test
+    void representativeIdAndCoordinatesStayStableWhenMarkerOrderChanges() throws Exception {
+        String first = "\"a\":{\"x\":0,\"y\":70,\"z\":0,\"label\":\"车站\"}";
+        String second = "\"b\":{\"x\":10,\"y\":80,\"z\":10,\"label\":\"车站\"}";
+        body.set(("{\"sets\":{\"s\":{\"markers\":{" + first + "," + second + "}}}}").getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result original = client.fetch(base, "Paralon", WORLD).get();
+        clock.addAndGet(300_001);
+        body.set(("{\"sets\":{\"s\":{\"markers\":{" + second + "," + first + "}}}}").getBytes(StandardCharsets.UTF_8));
+        DynmapMapClient.Result reordered = client.fetch(base, "Paralon", WORLD).get();
+        assertEquals(1, original.scenes().size());
+        assertEquals(original.scenes(), reordered.scenes());
+        assertTrue(original.scenes().getFirst().x() == 0 || original.scenes().getFirst().x() == 10);
+    }
+
+    @Test
     void malformedAndDegenerateAreasAreSkippedWithoutPoisoningValidPointMarkers() throws Exception {
         body.set("""
                 {"sets":{"s":{"markers":{"point":{"x":1,"y":70,"z":2,"label":"保留景点"}},"areas":{

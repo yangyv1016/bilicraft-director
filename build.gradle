@@ -4,11 +4,15 @@ plugins {
 
 allprojects {
     group = 'dev.bilicraft.director'
-    version = '0.1.1'
     repositories {
         mavenCentral()
     }
 }
+
+version = release_version
+project(':client-mod').version = client_version
+project(':server-plugin').version = server_version
+project(':protocol').version = protocol_version
 
 subprojects {
     plugins.withId('java') {

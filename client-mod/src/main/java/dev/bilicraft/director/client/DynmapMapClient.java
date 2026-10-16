@@ -24,6 +24,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -196,7 +198,8 @@ public final class DynmapMapClient implements AutoCloseable {
                                     .replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<")
                                     .replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
                                     .replaceAll("(?is)<[^>]*>", " ")
-                                    .replaceAll("§.", "").replaceAll("[\\p{Cc}\\p{Cf}]", " ").replaceAll("\\s+", " ").strip();
+                                    .replaceAll("§.|(?i:&[0-9a-fk-or])", "")
+                                    .replaceAll("[\\p{Cc}\\p{Cf}]", " ").replaceAll("\\s+", " ").strip();
                             if (name.isEmpty()) throw new IllegalArgumentException("Empty label");
                             if (name.codePointCount(0, name.length()) > 48) name = name.substring(0, name.offsetByCodePoints(0, 48));
                             if (!StandardCharsets.UTF_8.newEncoder().canEncode(name)) throw new IllegalArgumentException("Invalid label encoding");
@@ -209,7 +212,23 @@ public final class DynmapMapClient implements AutoCloseable {
                     }
                 }
             }
-            return new Result(scenes, regions, fetchedAt, "外链导入 " + scenes.size() + " 个候选" + (skipped == 0 ? "" : "，跳过 " + skipped + " 个无效标记"));
+            // Keep original IDs/coordinates, and choose the same representative if JSON order changes.
+            Map<String, List<Message.SceneView>> keptByName = new LinkedHashMap<>();
+            HashSet<String> keptIds = new HashSet<>();
+            for (Message.SceneView scene : scenes.stream().sorted(Comparator.comparing(Message.SceneView::id)).toList()) {
+                List<Message.SceneView> sameName = keptByName.computeIfAbsent(scene.name(), ignored -> new ArrayList<>());
+                boolean duplicate = sameName.stream().anyMatch(kept -> kept.kind() == scene.kind()
+                        && Math.hypot(kept.x() - scene.x(), kept.z() - scene.z()) <= 128);
+                if (!duplicate) {
+                    sameName.add(scene);
+                    keptIds.add(scene.id());
+                }
+            }
+            int duplicates = scenes.size() - keptIds.size();
+            scenes.removeIf(scene -> !keptIds.contains(scene.id()));
+            return new Result(scenes, regions, fetchedAt, "外链导入 " + scenes.size() + " 个候选"
+                    + (duplicates == 0 ? "" : "，合并 " + duplicates + " 个同名近距重复标记（128格内）")
+                    + (skipped == 0 ? "" : "，跳过 " + skipped + " 个无效标记"));
         } catch (RuntimeException | StackOverflowError exception) {
             throw new IOException("地图JSON格式无效；保留已有缓存");
         }
