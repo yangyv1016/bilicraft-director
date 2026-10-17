@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class LocalControlServerTest {
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
@@ -41,11 +43,11 @@ class LocalControlServerTest {
     void randomLoopbackInstancesHaveIndependentTokensAndReturnStateWithoutRewritingJson() throws Exception {
         AtomicReference<Thread> worker = new AtomicReference<>();
         String json = "{\"ok\":true,\"status\":\"本地运行\"}";
-        try (LocalControlServer server = new LocalControlServer(() -> {
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
             worker.set(Thread.currentThread());
             return CompletableFuture.completedFuture(json);
         }, body -> CompletableFuture.completedFuture("{}"));
-             LocalControlServer other = new LocalControlServer(() -> CompletableFuture.completedFuture("{}"),
+             LocalControlServer other = new LocalControlServer(0, () -> CompletableFuture.completedFuture("{}"),
                      body -> CompletableFuture.completedFuture("{}"))) {
             URI address = server.address();
             assertEquals("http", address.getScheme());
@@ -67,9 +69,84 @@ class LocalControlServerTest {
     }
 
     @Test
+    void anExplicitPortListensAndCanRestartWithANewSessionToken() throws Exception {
+        int port;
+        try (ServerSocket reservation = new ServerSocket()) {
+            reservation.bind(new InetSocketAddress("127.0.0.1", 0));
+            port = reservation.getLocalPort();
+        }
+        URI firstAddress;
+        try (LocalControlServer server = new LocalControlServer(port, () -> CompletableFuture.completedFuture("{\"run\":1}"),
+                body -> CompletableFuture.completedFuture("{}"))) {
+            firstAddress = server.address();
+            assertEquals(port, firstAddress.getPort());
+            assertEquals("{\"run\":1}", send(request(server, "/api/state").GET().build()).body());
+        }
+        try (LocalControlServer restarted = new LocalControlServer(port, () -> CompletableFuture.completedFuture("{\"run\":2}"),
+                body -> CompletableFuture.completedFuture("{}"))) {
+            assertEquals(port, restarted.address().getPort());
+            assertNotEquals(firstAddress.getFragment(), restarted.address().getFragment());
+            HttpRequest oldSession = HttpRequest.newBuilder(firstAddress.resolve("/api/state"))
+                    .timeout(Duration.ofSeconds(6)).header("X-BiliCraft-Token", firstAddress.getFragment()).GET().build();
+            assertEquals(403, send(oldSession).statusCode());
+            HttpResponse<String> response = send(request(restarted, "/api/state").GET().build());
+            assertEquals(200, response.statusCode());
+            assertEquals("{\"run\":2}", response.body());
+            assertSecurityHeaders(response);
+        }
+    }
+
+    @Test
+    void occupiedPreferredPortsAdvanceAndAReleasedPreferenceIsUsedOnTheNextStart() throws Exception {
+        List<ServerSocket> reservations = reserveAdjacentPorts();
+        int preferred = reservations.getFirst().getLocalPort();
+        String shiftedToken;
+        try (ServerSocket first = reservations.getFirst(); ServerSocket second = reservations.get(1);
+             LocalControlServer shifted = new LocalControlServer(preferred, () -> CompletableFuture.completedFuture("{}"),
+                     body -> CompletableFuture.completedFuture("{}"))) {
+            assertEquals(preferred + 1, second.getLocalPort());
+            assertTrue(shifted.address().getPort() >= preferred + 2);
+            assertTrue(shifted.address().getPort() <= Math.min(preferred + 99, 65_535));
+            shiftedToken = shifted.address().getFragment();
+            assertEquals(200, send(request(shifted, "/api/state").GET().build()).statusCode());
+        }
+        try (LocalControlServer preferredAgain = new LocalControlServer(preferred, () -> CompletableFuture.completedFuture("{}"),
+                body -> CompletableFuture.completedFuture("{}"))) {
+            assertEquals(preferred, preferredAgain.address().getPort());
+            assertNotEquals(shiftedToken, preferredAgain.address().getFragment());
+            assertEquals(200, send(request(preferredAgain, "/api/state").GET().build()).statusCode());
+        }
+    }
+
+    @Test
+    void anOccupiedMaximumPortFailsWithoutWrappingToARandomPort() throws Exception {
+        try (ServerSocket occupied = new ServerSocket()) {
+            try {
+                occupied.bind(new InetSocketAddress("127.0.0.1", 65_535));
+            } catch (BindException alreadyOccupied) {
+                // An existing listener exercises the same upper-bound behavior.
+            }
+            assertThrows(BindException.class, () -> {
+                try (LocalControlServer unexpected = new LocalControlServer(65_535, () -> CompletableFuture.completedFuture("{}"),
+                        body -> CompletableFuture.completedFuture("{}"))) {
+                    fail("Exhausting the configured range must not start a random listener");
+                }
+            });
+        }
+    }
+
+    @Test
+    void portValidationRejectsValuesOutsideTheTcpRange() {
+        for (int port : new int[]{-1, 65_536}) {
+            assertThrows(IllegalArgumentException.class, () -> new LocalControlServer(port,
+                    () -> CompletableFuture.completedFuture("{}"), body -> CompletableFuture.completedFuture("{}")));
+        }
+    }
+
+    @Test
     void apiRequiresExactlyOneTokenHeaderAndNeverAcceptsCredentialsFromTheUrl() throws Exception {
         AtomicInteger calls = new AtomicInteger();
-        try (LocalControlServer server = new LocalControlServer(() -> {
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
             calls.incrementAndGet();
             return CompletableFuture.completedFuture("{}");
         }, body -> CompletableFuture.completedFuture("{}"))) {
@@ -94,7 +171,7 @@ class LocalControlServerTest {
     @Test
     void rejectsHostAliasesAndForeignOrDuplicateOriginsWithoutCors() throws Exception {
         AtomicInteger calls = new AtomicInteger();
-        try (LocalControlServer server = new LocalControlServer(() -> {
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
             calls.incrementAndGet();
             return CompletableFuture.completedFuture("{}");
         }, body -> CompletableFuture.completedFuture("{}"))) {
@@ -120,7 +197,7 @@ class LocalControlServerTest {
     @Test
     void methodsPathsAndContentTypeAreCheckedBeforeInvokingCommands() throws Exception {
         AtomicInteger calls = new AtomicInteger();
-        try (LocalControlServer server = new LocalControlServer(() -> CompletableFuture.completedFuture("{}"), body -> {
+        try (LocalControlServer server = new LocalControlServer(0, () -> CompletableFuture.completedFuture("{}"), body -> {
             calls.incrementAndGet();
             return CompletableFuture.completedFuture("{}");
         })) {
@@ -150,7 +227,7 @@ class LocalControlServerTest {
         AtomicReference<String> received = new AtomicReference<>();
         AtomicInteger calls = new AtomicInteger();
         String json = "{\"ok\":true,\"result\":\"已保存\"}";
-        try (LocalControlServer server = new LocalControlServer(() -> CompletableFuture.completedFuture("{}"), body -> {
+        try (LocalControlServer server = new LocalControlServer(0, () -> CompletableFuture.completedFuture("{}"), body -> {
             received.set(body);
             calls.incrementAndGet();
             return CompletableFuture.completedFuture(json);
@@ -179,7 +256,7 @@ class LocalControlServerTest {
     @Test
     void callbackFailuresReturnGenericJsonWithoutExceptionOrRequestData() throws Exception {
         String privateValue = "api-key-never-return-this";
-        try (LocalControlServer server = new LocalControlServer(
+        try (LocalControlServer server = new LocalControlServer(0,
                 () -> CompletableFuture.failedFuture(new IllegalStateException(privateValue)),
                 body -> { throw new IllegalArgumentException(body); })) {
             for (HttpRequest request : List.of(request(server, "/api/state").GET().build(),
@@ -201,7 +278,7 @@ class LocalControlServerTest {
         CompletableFuture<String> command = new CompletableFuture<>();
         AtomicReference<CompletableFuture<String>> currentState = new AtomicReference<>(state);
         CountDownLatch entered = new CountDownLatch(2);
-        try (LocalControlServer server = new LocalControlServer(() -> {
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
             entered.countDown();
             return currentState.get();
         }, body -> {
@@ -227,7 +304,7 @@ class LocalControlServerTest {
 
     @Test
     void servesOnlyTheFourPackagedStaticPathsWithSecurityHeaders() throws Exception {
-        try (LocalControlServer server = new LocalControlServer(() -> CompletableFuture.completedFuture("{}"),
+        try (LocalControlServer server = new LocalControlServer(0, () -> CompletableFuture.completedFuture("{}"),
                 body -> CompletableFuture.completedFuture("{}"))) {
             for (String path : List.of("/", "/index.html", "/style.css", "/app.js")) {
                 String file = path.equals("/") ? "index.html" : path.substring(1);
@@ -254,7 +331,7 @@ class LocalControlServerTest {
         CountDownLatch entered = new CountDownLatch(1);
         AtomicReference<Thread> worker = new AtomicReference<>();
         var existingThreads = Thread.getAllStackTraces().keySet();
-        LocalControlServer server = new LocalControlServer(() -> {
+        LocalControlServer server = new LocalControlServer(0, () -> {
             worker.set(Thread.currentThread());
             entered.countDown();
             return state;
@@ -292,6 +369,31 @@ class LocalControlServerTest {
     private HttpRequest.Builder request(LocalControlServer server, String path) {
         return HttpRequest.newBuilder(server.address().resolve(path)).timeout(Duration.ofSeconds(6))
                 .header("X-BiliCraft-Token", server.address().getFragment());
+    }
+
+    private static List<ServerSocket> reserveAdjacentPorts() throws IOException {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            ServerSocket first = new ServerSocket();
+            first.bind(new InetSocketAddress("127.0.0.1", 0));
+            int port = first.getLocalPort();
+            if (port >= 65_534) {
+                first.close();
+                continue;
+            }
+            ServerSocket second = new ServerSocket();
+            try {
+                second.bind(new InetSocketAddress("127.0.0.1", port + 1));
+                return List.of(first, second);
+            } catch (BindException occupied) {
+                first.close();
+                second.close();
+            } catch (IOException exception) {
+                first.close();
+                second.close();
+                throw exception;
+            }
+        }
+        throw new IOException("Could not reserve adjacent loopback ports for the test");
     }
 
     private HttpResponse<String> send(HttpRequest request) throws IOException, InterruptedException {

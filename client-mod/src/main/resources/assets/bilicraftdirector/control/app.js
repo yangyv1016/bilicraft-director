@@ -21,7 +21,7 @@ const commandNames = {
     start: "启动导播", stop: "停止导播", previous: "上一素材插播", queueSkip: "跳过当前",
     refresh: "拉取目标", mapRefresh: "拉取地图", mapSettings: "保存本机地图来源", show: "立即插播", camera: "调整运镜", ai: "保存 AI 配置", aiTest: "测试 AI 连接",
     queueAdd: "加入待播队列", queueRemove: "移除待播项", queueMove: "调整待播顺序", queueSettings: "保存队列配置",
-    queueAdjust: "调整排播时长", chatSend: "发送聊天"
+    queueAdjust: "调整排播时长", chatSend: "发送聊天", webSettings: "保存本地中控端口"
 };
 const tokenStorageKey = "bilicraft-control-token";
 let sessionToken = location.hash.slice(1);
@@ -51,6 +51,7 @@ let liveCameraPersist = false;
 let liveCameraRequest = null;
 let cameraSavePending = false;
 let queueSettingsDirty = false;
+let webSettingsDirty = false;
 let mapDraft = null;
 let entryDurationDirty = false;
 let currentProvider = "DEEPSEEK";
@@ -156,6 +157,9 @@ function updateAvailability() {
     element("liveMotionAmplitude").title = amplitudeUsed ? "运动范围受镜头距离和世界边界约束" : "当前模式不使用运动幅度；已保留给其它模式";
     element("saveLiveCamera").disabled = !available || liveCameraSending || cameraSavePending || (state?.cameraSettingsSaved && !liveCameraDirty);
     element("saveQueueSettings").disabled = !available || busy || !queueSettingsDirty;
+    element("saveWebSettings").disabled = !available || busy || !webSettingsDirty;
+    element("webPreferredPort").disabled = !available;
+    element("resetWebSettings").disabled = !state;
     const canConfigureMap = Boolean(available && state.connected && state.world && state.server);
     for (const id of ["mapLocalBaseUrl", "mapLocalWorld", "resetMapSettings", "clearMapSettings"]) {
         element(id).disabled = !canConfigureMap || busy;
@@ -359,6 +363,7 @@ function applyState(next) {
             : next.cameraSettingsSaved ? "已应用 · 已保存" : "已实时应用 · 未保存";
     }
     if (!queueSettingsDirty && !element("queueSettingsForm").contains(document.activeElement)) loadQueueSettings();
+    renderWebSettings();
     if (!entryDurationDirty && document.activeElement !== element("entryDuration")) {
         element("entryDuration").value = selectedTarget?.kind === "PLAYER" ? "" : next.queue.settings.sceneDurationSeconds;
     }
@@ -589,6 +594,26 @@ function loadQueueSettings() {
     element("queueBufferSize").value = state.queue.settings.bufferSize;
     element("queueSceneDuration").value = state.queue.settings.sceneDurationSeconds;
     element("queueDraftStatus").textContent = "已同步";
+}
+
+function renderWebSettings() {
+    const configuration = state.localControl;
+    if (!webSettingsDirty && !element("webSettingsForm").contains(document.activeElement)) {
+        element("webPreferredPort").value = configuration.preferredPort;
+    }
+    const restartPending = configuration.preferredPort !== configuration.startPort;
+    element("webDraftStatus").textContent = webSettingsDirty ? "未保存草稿"
+        : restartPending ? "已保存 · 下次重启生效" : "已同步";
+    element("webActiveAddress").textContent = "http://127.0.0.1:" + configuration.activePort + "/";
+    element("webStartPort").textContent = String(configuration.startPort);
+    element("webSavedPort").textContent = String(configuration.preferredPort);
+    element("webPortFallback").textContent = configuration.activePort === configuration.startPort
+        ? "本次已使用启动首选端口。"
+        : "本次启动首选端口 " + configuration.startPort + " 被占用或不可用，已自动顺延至 " + configuration.activePort + "。";
+    element("webRestartStatus").textContent = configuration.loadFailed
+        ? "端口配置读取失败，本次使用默认首选端口；可重新保存。当前地址保持不变。"
+        : restartPending ? "首选端口 " + configuration.preferredPort + " 已保存。当前地址保持不变，完整重启客户端后生效。"
+            : "首选端口已保存。修改后需完整重启客户端；停止导播或刷新网页不会切换端口。";
 }
 
 function addSelectedToQueue(index) {
@@ -1083,6 +1108,30 @@ element("queueSettingsForm").addEventListener("submit", async (event) => {
     }
 });
 
+element("webPreferredPort").addEventListener("input", () => {
+    webSettingsDirty = true;
+    element("webDraftStatus").textContent = "未保存草稿";
+    updateAvailability();
+});
+element("resetWebSettings").addEventListener("click", () => {
+    if (!state) return;
+    webSettingsDirty = false;
+    element("webPreferredPort").value = state.localControl.preferredPort;
+    renderWebSettings();
+    updateAvailability();
+});
+element("webSettingsForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (element("saveWebSettings").disabled || !element("webSettingsForm").reportValidity()) return;
+    const port = Number(element("webPreferredPort").value);
+    const result = await sendCommand({ action: "webSettings", port });
+    if (result.ok && result.synchronized && Number(element("webPreferredPort").value) === port) {
+        webSettingsDirty = false;
+        renderWebSettings();
+        updateAvailability();
+    }
+});
+
 document.querySelectorAll("[data-provider]").forEach((button) => {
     button.addEventListener("click", () => {
         currentProvider = button.dataset.provider;
@@ -1184,7 +1233,7 @@ for (const [buttonId, settings] of [["workspaceTab", false], ["settingsTab", tru
     });
 }
 function selectConfiguration(tab) {
-    for (const name of ["camera", "queue", "ai", "map", "rules"]) element(name + "Config").hidden = name !== tab;
+    for (const name of ["camera", "queue", "ai", "map", "web", "rules"]) element(name + "Config").hidden = name !== tab;
     document.querySelectorAll("[data-config-tab]").forEach((button) => {
         const active = button.dataset.configTab === tab;
         button.classList.toggle("active", active);

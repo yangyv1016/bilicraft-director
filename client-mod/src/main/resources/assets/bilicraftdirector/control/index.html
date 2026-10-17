@@ -384,6 +384,7 @@
                         <button data-config-tab="queue" aria-pressed="false">队列</button>
                         <button data-config-tab="ai" aria-pressed="false">AI 提供方</button>
                         <button data-config-tab="map" aria-pressed="false">地图数据</button>
+                        <button data-config-tab="web" aria-pressed="false">本地中控</button>
                         <button data-config-tab="rules" aria-pressed="false">规则与能力</button>
                     </nav>
                     <section id="cameraConfig" class="configuration-panel" aria-label="运镜配置">
@@ -664,6 +665,44 @@
                                 <p>点击按钮后由客户端直连地图外链，不经游戏服务器下载或传输地图 JSON；页面轮询只读取本机状态。当前未启用持续热力采集。</p>
                                 <h3>没有导播服务时</h3>
                                 <p>照常使用本机地图来源、观景缓存、巡游与队列。玩家跟随仍须由导播服务授权，不会在本地模式下启动。</p>
+                            </aside>
+                        </div>
+                    </section>
+                    <section id="webConfig" class="configuration-panel" hidden aria-label="本地中控配置">
+                        <div class="configuration-heading">
+                            <h2>本地中控</h2>
+                            <p>设置 WebUI 下次启动时优先使用的端口。保存后当前页面继续使用原地址，完整重启客户端后生效。</p>
+                        </div>
+                        <div class="configuration-columns">
+                            <section class="configuration-card">
+                                <form id="webSettingsForm">
+                                    <div class="form-section-heading">
+                                        <h3>首选端口</h3>
+                                        <span id="webDraftStatus">等待同步</span>
+                                    </div>
+                                    <label class="setting-label" for="webPreferredPort">本地端口</label>
+                                    <input id="webPreferredPort" class="setting-number" type="number" min="1" max="65535" step="1" required value="16360" disabled>
+                                    <p class="field-help">默认 16360，可设置 1–65535。首选端口被占用时自动向后寻找可用端口。</p>
+                                    <div class="form-actions">
+                                        <button id="saveWebSettings" class="button accent" type="submit" disabled>保存，下次重启生效</button>
+                                        <button id="resetWebSettings" class="button" type="button" disabled>放弃草稿</button>
+                                    </div>
+                                </form>
+                                <dl class="map-data-details">
+                                    <dt>当前实际地址</dt><dd id="webActiveAddress">等待同步</dd>
+                                    <dt>本次启动首选端口</dt><dd id="webStartPort">—</dd>
+                                    <dt>已保存首选端口</dt><dd id="webSavedPort">—</dd>
+                                </dl>
+                                <p id="webPortFallback" class="field-help">等待客户端端口状态。</p>
+                                <p id="webRestartStatus" class="field-help" role="status">保存不会切换当前中控地址。</p>
+                            </section>
+                            <aside class="configuration-notes">
+                                <h3>保存与生效</h3>
+                                <p>完整退出并重新启动 Minecraft 客户端后，中控会从已保存的首选端口开始绑定。退出服务器、停止导播或刷新网页不会重新绑定端口。</p>
+                                <h3>端口占用时</h3>
+                                <p>首选端口不可用时自动顺延；实际使用的地址显示在左侧。重启后请从 Mod 菜单重新打开中控。</p>
+                                <h3>仅本机访问</h3>
+                                <p>中控固定监听 127.0.0.1。本页只设置端口，不改变登录配对与访问权限。</p>
                             </aside>
                         </div>
                     </section>

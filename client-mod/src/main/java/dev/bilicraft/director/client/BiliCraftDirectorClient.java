@@ -9,6 +9,7 @@ import com.google.gson.JsonParseException;
 import com.google.gson.JsonPrimitive;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.FloatArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import dev.bilicraft.director.protocol.Codec;
 import dev.bilicraft.director.protocol.Message;
 import dev.bilicraft.director.protocol.Message.ObserveState;
@@ -102,6 +103,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private boolean worldPolicyPending;
     private long worldPolicyDeadline;
     private LocalControlServer localControlServer;
+    private final LocalControlSettings localControlSettings = new LocalControlSettings(FabricLoader.getInstance().getConfigDir()
+            .resolve("bilicraft-director-web.properties"));
+    private int localControlStartPort;
     private final AccountAvatar accountAvatar = new AccountAvatar();
     private final LocalChatHistory localChat = new LocalChatHistory();
     private final DynmapMapClient mapClient = new DynmapMapClient();
@@ -224,6 +228,33 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             queueSettings.loadFailed = true;
             LOGGER.warn("Cannot read queue configuration", exception);
         }
+        try {
+            localControlSettings.load();
+        } catch (IOException | IllegalArgumentException exception) {
+            localControlSettings.loadFailed = true;
+            LOGGER.warn("Cannot read local control port configuration; using default {}", LocalControlServer.DEFAULT_PORT, exception);
+        }
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(literal("directorweb")
+                .executes(context -> {
+                    openLocalControl();
+                    context.getSource().sendFeedback(Text.literal(status()));
+                    return localControlServer == null ? 0 : 1;
+                })
+                .then(literal("port").executes(context -> {
+                    context.getSource().sendFeedback(Text.literal("中控首选端口：" + localControlSettings.port
+                            + (localControlServer == null ? "，尚未启动" : "，当前实际端口：" + localControlServer.address().getPort())));
+                    return 1;
+                }).then(argument("port", IntegerArgumentType.integer(1, 65_535)).executes(context -> {
+                    try {
+                        saveLocalControlPort(IntegerArgumentType.getInteger(context, "port"));
+                        context.getSource().sendFeedback(Text.literal(status()));
+                        return 1;
+                    } catch (IOException exception) {
+                        LOGGER.warn("Cannot save local control port configuration", exception);
+                        context.getSource().sendError(Text.literal("中控端口保存失败，请检查配置目录"));
+                        return 0;
+                    }
+                })))));
         PayloadTypeRegistry.playS2C().register(DirectorPayload.ID, DirectorPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(DirectorPayload.ID, DirectorPayload.CODEC);
         ClientPlayNetworking.registerGlobalReceiver(DirectorPayload.ID, (payload, context) -> {
@@ -1978,17 +2009,28 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         MinecraftClient client = MinecraftClient.getInstance();
         try {
             if (localControlServer == null) {
-                localControlServer = new LocalControlServer(
+                localControlServer = new LocalControlServer(localControlSettings.port,
                         () -> onClientThread(this::readLocalControlState),
                         command -> onClientThread(() -> executeLocalControlCommand(command)));
+                localControlStartPort = localControlSettings.port;
+                LOGGER.info("Local control listening on 127.0.0.1:{}, preferred port {}",
+                        localControlServer.address().getPort(), localControlStartPort);
             }
             client.setScreen(null);
             Util.getOperatingSystem().open(localControlServer.address());
-            status = "本地中控已打开；仅本机可访问";
+            status = "本地中控已打开：http://127.0.0.1:" + localControlServer.address().getPort() + "/"
+                    + (localControlServer.address().getPort() != localControlStartPort ? "；首选端口被占用，已自动顺延" : "");
         } catch (IOException exception) {
             LOGGER.warn("Cannot start local control server", exception);
-            status = "本地中控启动失败，请查看日志";
+            status = "本地中控启动失败（首选端口 " + localControlSettings.port
+                    + "）；请查看日志，或用 /directorweb port <端口> 保存其他首选端口";
         }
+    }
+
+    private void saveLocalControlPort(int port) throws IOException {
+        localControlSettings.save(port);
+        status = "中控首选端口已保存为 " + port + (localControlServer == null ? "，打开中控时应用"
+                : "，重启客户端后生效；当前端口仍为 " + localControlServer.address().getPort());
     }
 
     private CompletableFuture<String> onClientThread(Supplier<String> operation) {
@@ -2023,6 +2065,12 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         state.addProperty("spectator", client.player != null && client.player.isSpectator());
         state.addProperty("status", status());
         state.addProperty("world", worldKey);
+        JsonObject localControl = new JsonObject();
+        localControl.addProperty("preferredPort", localControlSettings.port);
+        localControl.addProperty("activePort", localControlServer == null ? 0 : localControlServer.address().getPort());
+        localControl.addProperty("startPort", localControlStartPort);
+        localControl.addProperty("loadFailed", localControlSettings.loadFailed);
+        state.add("localControl", localControl);
         JsonObject chat = new JsonObject();
         chat.addProperty("connected", connected);
         chat.addProperty("maxLength", LocalChatHistory.MAX_SEND_LENGTH);
@@ -2282,6 +2330,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 case "queueMove" -> Set.of("action", "entryId", "index", "delta");
                 case "queueAdjust" -> Set.of("action", "entryId", "deltaSeconds");
                 case "queueSettings" -> Set.of("action", "autoFill", "bufferSize", "sceneDurationSeconds");
+                case "webSettings" -> Set.of("action", "port");
                 case "camera" -> Set.of("action", "radius", "speed", "mode", "heightY", "playerHeightOffset", "motionAmplitude",
                         "turnRateDegreesPerSecond", "persist");
                 case "ai" -> Set.of("action", "provider", "baseUrl", "model", "apiKey", "clearKey", "enabled");
@@ -2292,6 +2341,10 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 throw new IllegalArgumentException("Unknown command field");
             }
             accepted = switch (action) {
+                case "webSettings" -> {
+                    saveLocalControlPort(commandInteger(command, "port"));
+                    yield true;
+                }
                 case "chatSend" -> {
                     if (client.getNetworkHandler() == null || client.world == null || client.player == null) {
                         status = "聊天发送失败：尚未连接游戏";

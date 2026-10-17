@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -28,6 +29,8 @@ import java.util.function.Supplier;
 
 /** Local HTTP boundary only; callbacks must promptly return futures scheduled by the game-thread owner. */
 public final class LocalControlServer implements AutoCloseable {
+    public static final int DEFAULT_PORT = 16_360;
+    private static final int MAX_PORT_ATTEMPTS = 100;
     private static final int MAX_COMMAND_BYTES = 16_384;
     private static final String JSON = "application/json; charset=utf-8";
     private final HttpServer server;
@@ -42,13 +45,33 @@ public final class LocalControlServer implements AutoCloseable {
 
     public LocalControlServer(Supplier<CompletableFuture<String>> readState,
                               Function<String, CompletableFuture<String>> executeCommand) throws IOException {
+        this(DEFAULT_PORT, readState, executeCommand);
+    }
+
+    public LocalControlServer(int port, Supplier<CompletableFuture<String>> readState,
+                              Function<String, CompletableFuture<String>> executeCommand) throws IOException {
+        if (port < 0 || port > 65_535) throw new IllegalArgumentException("Local control port must be between 0 and 65535");
         this.readState = Objects.requireNonNull(readState);
         this.executeCommand = Objects.requireNonNull(executeCommand);
         byte[] random = new byte[32];
         new SecureRandom().nextBytes(random);
         String sessionToken = HexFormat.of().formatHex(random);
         token = sessionToken.getBytes(StandardCharsets.UTF_8);
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 16);
+        server = HttpServer.create();
+        try {
+            int lastPort = Math.min(port + MAX_PORT_ATTEMPTS - 1, 65_535);
+            for (int candidate = port;; candidate++) {
+                try {
+                    server.bind(new InetSocketAddress("127.0.0.1", candidate), 16);
+                    break;
+                } catch (BindException exception) {
+                    if (candidate == 0 || candidate == lastPort) throw exception;
+                }
+            }
+        } catch (IOException exception) {
+            server.stop(0);
+            throw exception;
+        }
         authority = "127.0.0.1:" + server.getAddress().getPort();
         origin = "http://" + authority;
         address = URI.create(origin + "/#" + sessionToken);

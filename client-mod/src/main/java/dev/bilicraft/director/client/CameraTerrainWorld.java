@@ -16,6 +16,7 @@ import java.util.List;
 
 /** Main-thread terrain queries with a bounded block-read budget for one planning pass. */
 final class CameraTerrainWorld implements CameraTerrainAvoidance.Terrain {
+    private static final double VIEW_DISTANCE = 8;
     private final ClientWorld world;
     private final Box localBox;
     private final Vec3d eyeOffset;
@@ -77,15 +78,14 @@ final class CameraTerrainWorld implements CameraTerrainAvoidance.Terrain {
         Vec3d end = new Vec3d(lookAt.x(), lookAt.y(), lookAt.z());
         Vec3d delta = end.subtract(eye);
         double distance = delta.length();
-        // Map anchors may lie inside the building or terrain being shown.
-        end = distance <= 4 ? eye : end.subtract(delta.multiply(4 / distance));
+        // Only foreground occlusion affects the shot; remote map anchors may be inside buildings or terrain.
+        if (distance > VIEW_DISTANCE) end = eye.add(delta.multiply(VIEW_DISTANCE / distance));
         long steps = 4L + Math.abs((long) MathHelper.floor(end.x) - MathHelper.floor(eye.x))
                 + Math.abs((long) MathHelper.floor(end.y) - MathHelper.floor(eye.y))
                 + Math.abs((long) MathHelper.floor(end.z) - MathHelper.floor(eye.z));
         if (steps > remainingScans) return CameraTerrainAvoidance.Clearance.UNKNOWN;
         remainingScans -= steps;
         if (!chunksLoaded(new Box(eye, end).expand(1))) return CameraTerrainAvoidance.Clearance.UNKNOWN;
-        if (distance <= 4) return CameraTerrainAvoidance.Clearance.CLEAR;
         return world.raycast(new RaycastContext(eye, end, RaycastContext.ShapeType.VISUAL,
                 RaycastContext.FluidHandling.NONE, ShapeContext.absent())).getType() == HitResult.Type.MISS
                 ? CameraTerrainAvoidance.Clearance.CLEAR : CameraTerrainAvoidance.Clearance.BLOCKED;
