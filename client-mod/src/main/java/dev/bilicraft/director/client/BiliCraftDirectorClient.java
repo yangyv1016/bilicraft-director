@@ -1977,7 +1977,23 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             wantedVelocity = wantedVelocity.normalize().multiply(maxPerTick);
         }
         Vec3d nextVelocity = player.getVelocity().lerp(wantedVelocity, 0.18);
+        if (nextVelocity.lengthSquared() > maxPerTick * maxPerTick) {
+            nextVelocity = nextVelocity.normalize().multiply(maxPerTick);
+        }
         Vec3d nextPosition = player.getEntityPos().add(nextVelocity);
+        CameraTerrainWorld stepTerrain = new CameraTerrainWorld(player, worldExclusions(),
+                subject.player() ? 0 : settings.minGroundClearance);
+        CameraMotion.Point safeStep = CameraGroundClearance.constrainStep(
+                new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
+                new CameraMotion.Point(nextPosition.x, nextPosition.y, nextPosition.z),
+                player.getVelocity().y, maxPerTick, stepTerrain);
+        if (safeStep == null) {
+            stopMotion();
+            status = "等待脚下及前方区块的真实地表高度";
+            return;
+        }
+        nextPosition = new Vec3d(safeStep.x(), safeStep.y(), safeStep.z());
+        nextVelocity = nextPosition.subtract(player.getEntityPos());
         if (!client.world.getWorldBorder().contains(nextPosition)
                 || nextPosition.y < client.world.getBottomY() || nextPosition.y > client.world.getTopYInclusive()
                 || insideExcludedRegion(nextPosition)) {
@@ -1991,7 +2007,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "前方机位到达世界边界、高度限制或排除区，已暂缓移动";
             return;
         }
-        if (new CameraTerrainWorld(player, worldExclusions()).path(
+        if (stepTerrain.path(
                 new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
                 new CameraMotion.Point(nextPosition.x, nextPosition.y, nextPosition.z)) != CameraTerrainAvoidance.Clearance.CLEAR) {
             stopMotion();
