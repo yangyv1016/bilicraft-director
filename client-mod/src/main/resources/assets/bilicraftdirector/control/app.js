@@ -15,8 +15,8 @@ const cameraModeHelp = {
     PAN: "固定机位，缓慢左右扫视；运动幅度控制扫视范围。",
     STATIC: "保持固定机位，持续朝向目标。玩家走动时会转头追踪。"
 };
-const cameraNumberSettings = ["radius", "speed", "heightY", "playerHeightOffset", "motionAmplitude", "turnRateDegreesPerSecond"];
-const liveCameraIds = { radius: "Radius", speed: "Speed", heightY: "HeightY", playerHeightOffset: "PlayerHeightOffset", motionAmplitude: "MotionAmplitude", turnRateDegreesPerSecond: "TurnRateDegreesPerSecond" };
+const cameraNumberSettings = ["radius", "speed", "heightY", "playerHeightOffset", "motionAmplitude", "turnRateDegreesPerSecond", "maxPitchDegrees", "minGroundClearance"];
+const liveCameraIds = { radius: "Radius", speed: "Speed", heightY: "HeightY", playerHeightOffset: "PlayerHeightOffset", motionAmplitude: "MotionAmplitude", turnRateDegreesPerSecond: "TurnRateDegreesPerSecond", maxPitchDegrees: "MaxPitchDegrees", minGroundClearance: "MinGroundClearance" };
 const commandNames = {
     start: "启动导播", stop: "停止导播", previous: "上一素材插播", queueSkip: "跳过当前",
     refresh: "拉取目标", mapRefresh: "拉取地图", mapSettings: "保存本机地图来源", show: "立即插播", camera: "调整运镜", ai: "保存 AI 配置", aiTest: "测试 AI 连接",
@@ -151,6 +151,7 @@ function updateAvailability() {
     element("saveCamera").disabled = !available || busy || cameraSavePending || !cameraDirty;
     const idlePlaying = state?.running && state.queue.current?.kind === "IDLE";
     element("liveCameraMode").disabled = !available || cameraSavePending || idlePlaying;
+    element("liveAutoDistance").disabled = !available || cameraSavePending || idlePlaying;
     for (const setting of cameraNumberSettings) element("live" + liveCameraIds[setting]).disabled = !available || cameraSavePending || idlePlaying;
     const amplitudeUsed = ["AUTO", "DOLLY", "TRUCK", "CRANE", "PAN"].includes(element("liveCameraMode").value);
     element("liveMotionAmplitude").disabled ||= !amplitudeUsed;
@@ -353,10 +354,13 @@ function applyState(next) {
     element("cameraActual").textContent = "当前：" + cameraModeNames[next.settings.mode] + " · 距离 " + next.settings.radius
         + " 格 · 速度 " + next.settings.speed + " 格 / 秒 · 场景 Y " + next.settings.heightY
         + " · 跟拍高度 +" + next.settings.playerHeightOffset
-        + " 格 · 幅度 " + next.settings.motionAmplitude + " 格 · 转向 " + next.settings.turnRateDegreesPerSecond + " 度 / 秒";
+        + " 格 · 幅度 " + next.settings.motionAmplitude + " 格 · 转向 " + next.settings.turnRateDegreesPerSecond
+        + " 度 / 秒 · 最大俯仰 ±" + next.settings.maxPitchDegrees + " 度 · 自动拉远" + (next.settings.autoDistance ? "开启" : "关闭")
+        + " · 最低离地 " + next.settings.minGroundClearance + " 格";
     if (!cameraDirty && !element("cameraForm").contains(document.activeElement)) loadCameraValues();
     if (!liveCameraDirty && !liveCameraSending) {
         element("liveCameraMode").value = next.settings.mode;
+        element("liveAutoDistance").checked = next.settings.autoDistance;
         for (const setting of cameraNumberSettings) element("live" + liveCameraIds[setting]).value = next.settings[setting];
         renderLiveCameraValues();
         element("liveCameraStatus").textContent = next.running && next.queue.current?.kind === "IDLE" ? "挂机点 · 位置与注视方向锁定"
@@ -779,6 +783,7 @@ function renderSelection() {
 
 function loadCameraValues() {
     element("cameraMode").value = state.settings.mode;
+    element("autoDistance").checked = state.settings.autoDistance;
     element("cameraModeHelp").textContent = cameraModeHelp[state.settings.mode];
     for (const setting of cameraNumberSettings) {
         element(setting + "Range").value = element(setting + "Number").value = state.settings[setting];
@@ -789,7 +794,7 @@ function loadCameraValues() {
 function renderLiveCameraValues() {
     for (const setting of cameraNumberSettings) {
         element("live" + liveCameraIds[setting] + "Value").textContent = element("live" + liveCameraIds[setting]).value
-            + (setting === "heightY" ? "" : setting === "speed" ? " 格/秒" : setting === "turnRateDegreesPerSecond" ? " 度/秒" : " 格");
+            + (setting === "heightY" ? "" : setting === "speed" ? " 格/秒" : setting === "turnRateDegreesPerSecond" ? " 度/秒" : setting === "maxPitchDegrees" ? " 度" : " 格");
     }
 }
 
@@ -805,7 +810,7 @@ function scheduleLiveCamera(persist, immediate) {
 async function flushLiveCamera() {
     if (liveCameraSending || cameraSavePending || !liveCameraDirty || !apiOnline) return;
     const revision = liveCameraRevision;
-    const command = { action: "camera", mode: element("liveCameraMode").value, persist: liveCameraPersist };
+    const command = { action: "camera", mode: element("liveCameraMode").value, autoDistance: element("liveAutoDistance").checked, persist: liveCameraPersist };
     for (const setting of cameraNumberSettings) command[setting] = Number(element("live" + liveCameraIds[setting]).value);
     liveCameraPersist = false;
     liveCameraSending = true;
@@ -1021,6 +1026,10 @@ element("liveCameraMode").addEventListener("change", () => {
     scheduleLiveCamera(false, true);
     updateAvailability();
 });
+element("liveAutoDistance").addEventListener("change", () => {
+    scheduleLiveCamera(false, true);
+    updateAvailability();
+});
 for (const setting of cameraNumberSettings) {
     const slider = element("live" + liveCameraIds[setting]);
     slider.addEventListener("input", () => {
@@ -1033,6 +1042,11 @@ element("saveLiveCamera").addEventListener("click", () => scheduleLiveCamera(tru
 element("cameraMode").addEventListener("change", () => {
     cameraDirty = true;
     element("cameraModeHelp").textContent = cameraModeHelp[element("cameraMode").value];
+    element("cameraDraftStatus").textContent = "未应用草稿";
+    updateAvailability();
+});
+element("autoDistance").addEventListener("change", () => {
+    cameraDirty = true;
     element("cameraDraftStatus").textContent = "未应用草稿";
     updateAvailability();
 });
@@ -1056,7 +1070,7 @@ element("resetCamera").addEventListener("click", () => {
 element("cameraForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (element("saveCamera").disabled || !element("cameraForm").reportValidity()) return;
-    const command = { action: "camera", mode: element("cameraMode").value };
+    const command = { action: "camera", mode: element("cameraMode").value, autoDistance: element("autoDistance").checked };
     for (const setting of cameraNumberSettings) command[setting] = Number(element(setting + "Number").value);
     // A newer explicit save supersedes queued previews, and waits for an already-sent preview to drain.
     clearTimeout(liveCameraTimer);
@@ -1070,7 +1084,8 @@ element("cameraForm").addEventListener("submit", async (event) => {
     cameraSavePending = false;
     if (result.ok && result.synchronized) {
         // Keep any edits made while the request was pending.
-        if (element("cameraMode").value === command.mode && cameraNumberSettings.every((setting) => Number(element(setting + "Number").value) === command[setting])) {
+        if (element("cameraMode").value === command.mode && element("autoDistance").checked === command.autoDistance
+                && cameraNumberSettings.every((setting) => Number(element(setting + "Number").value) === command[setting])) {
             cameraDirty = false;
             loadCameraValues();
             updateAvailability();

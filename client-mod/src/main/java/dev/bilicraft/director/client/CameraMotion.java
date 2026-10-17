@@ -15,6 +15,30 @@ final class CameraMotion {
 
     record Shot(Point position, Point lookAt) { }
 
+    /** Expands only the target X/Z composition; movement and terrain checks stay with the controller. */
+    static Shot widenForPitch(Shot intended, Point actual, double temporaryLift, double eyeHeight,
+                              double maxPitchDegrees, double maximumDistance) {
+        double dx = intended.position().x() - intended.lookAt().x();
+        double dz = intended.position().z() - intended.lookAt().z();
+        double radius = Math.hypot(dx, dz);
+        double eyeY = Math.max(intended.position().y() + temporaryLift, actual.y()) + eyeHeight;
+        double threshold = Math.max(5, maxPitchDegrees - 5);
+        double desiredRadius = Math.min(maximumDistance,
+                Math.abs(eyeY - intended.lookAt().y()) / Math.tan(Math.toRadians(threshold)));
+        if (desiredRadius <= radius) return intended;
+        if (radius == 0) {
+            dx = actual.x() - intended.lookAt().x();
+            dz = actual.z() - intended.lookAt().z();
+            radius = Math.hypot(dx, dz);
+            if (radius == 0) {
+                dx = 1;
+                radius = 1;
+            }
+        }
+        return new Shot(new Point(intended.lookAt().x() + dx / radius * desiredRadius,
+                intended.position().y(), intended.lookAt().z() + dz / radius * desiredRadius), intended.lookAt());
+    }
+
     private String subjectId;
     private Mode mode;
     private double baseAngle;

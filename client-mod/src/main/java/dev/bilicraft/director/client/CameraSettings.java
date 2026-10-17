@@ -21,6 +21,9 @@ final class CameraSettings {
     double playerHeightOffset = 4;
     double motionAmplitude = 8;
     double turnRateDegreesPerSecond = 30;
+    double maxPitchDegrees = 45;
+    boolean autoDistance = true;
+    double minGroundClearance = 16;
 
     CameraSettings() {
         this(FabricLoader.getInstance().getConfigDir().resolve("bilicraft-director.properties"));
@@ -31,13 +34,16 @@ final class CameraSettings {
     }
 
     static void validate(CameraMotion.Mode mode, double radius, double speed, double heightY,
-                         double playerHeightOffset, double amplitude, double turnRate) {
+                         double playerHeightOffset, double amplitude, double turnRate, double maxPitchDegrees,
+                         double minGroundClearance) {
         if (mode == null || !Double.isFinite(radius) || radius < 6 || radius > 256
                 || !Double.isFinite(speed) || speed < 0.5 || speed > 5
                 || !Double.isFinite(heightY) || heightY < -64 || heightY > 256
                 || !Double.isFinite(playerHeightOffset) || playerHeightOffset < 1 || playerHeightOffset > 12
                 || !Double.isFinite(amplitude) || amplitude < 2 || amplitude > 24
-                || !Double.isFinite(turnRate) || turnRate < 6 || turnRate > 80) {
+                || !Double.isFinite(turnRate) || turnRate < 6 || turnRate > 80
+                || !Double.isFinite(maxPitchDegrees) || maxPitchDegrees < 5 || maxPitchDegrees > 80
+                || !Double.isFinite(minGroundClearance) || minGroundClearance < 0 || minGroundClearance > 128) {
             throw new IllegalArgumentException("Camera settings outside supported range");
         }
     }
@@ -65,7 +71,15 @@ final class CameraSettings {
                     properties.getProperty("camera.height-offset", "4")));
             double savedAmplitude = Double.parseDouble(properties.getProperty("camera.motion-amplitude", "8"));
             double savedTurnRate = Double.parseDouble(properties.getProperty("camera.turn-rate", "30"));
-            validate(savedMode, savedRadius, savedSpeed, savedHeightY, savedPlayerHeight, savedAmplitude, savedTurnRate);
+            double savedMaxPitch = Double.parseDouble(properties.getProperty("camera.max-pitch", "45"));
+            boolean savedAutoDistance = switch (properties.getProperty("camera.auto-distance", "true")) {
+                case "true" -> true;
+                case "false" -> false;
+                default -> throw new IllegalArgumentException("Invalid camera auto-distance setting");
+            };
+            double savedGroundClearance = Double.parseDouble(properties.getProperty("camera.min-ground-clearance", "16"));
+            validate(savedMode, savedRadius, savedSpeed, savedHeightY, savedPlayerHeight, savedAmplitude,
+                    savedTurnRate, savedMaxPitch, savedGroundClearance);
             mode = savedMode;
             radius = savedRadius;
             speed = savedSpeed;
@@ -73,13 +87,17 @@ final class CameraSettings {
             playerHeightOffset = savedPlayerHeight;
             motionAmplitude = savedAmplitude;
             turnRateDegreesPerSecond = savedTurnRate;
+            maxPitchDegrees = savedMaxPitch;
+            autoDistance = savedAutoDistance;
+            minGroundClearance = savedGroundClearance;
         } catch (IOException | IllegalArgumentException exception) {
             logger.warn("Cannot read camera configuration; using defaults", exception);
         }
     }
 
     boolean save(Logger logger) {
-        validate(mode, radius, speed, heightY, playerHeightOffset, motionAmplitude, turnRateDegreesPerSecond);
+        validate(mode, radius, speed, heightY, playerHeightOffset, motionAmplitude,
+                turnRateDegreesPerSecond, maxPitchDegrees, minGroundClearance);
         Properties properties = new Properties();
         properties.setProperty("camera.mode", mode.name());
         properties.setProperty("camera.radius", Double.toString(radius));
@@ -88,6 +106,9 @@ final class CameraSettings {
         properties.setProperty("camera.player-height-offset", Double.toString(playerHeightOffset));
         properties.setProperty("camera.motion-amplitude", Double.toString(motionAmplitude));
         properties.setProperty("camera.turn-rate", Double.toString(turnRateDegreesPerSecond));
+        properties.setProperty("camera.max-pitch", Double.toString(maxPitchDegrees));
+        properties.setProperty("camera.auto-distance", Boolean.toString(autoDistance));
+        properties.setProperty("camera.min-ground-clearance", Double.toString(minGroundClearance));
         try {
             Files.createDirectories(path.getParent());
             Path temporary = Files.createTempFile(path.getParent(), "bilicraft-camera-", ".tmp");

@@ -105,6 +105,91 @@ class CameraTerrainAvoidanceTest {
     }
 
     @Test
+    void aPreviouslyRaisedCameraCanClimbAboveTheOld192BlockSearchLimitFromALoadedSurface() {
+        CameraMotion.Shot lowBaseline = new CameraMotion.Shot(new CameraMotion.Point(12, 64, 0), center);
+        CameraMotion.Point current = new CameraMotion.Point(12, 276, 0);
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.groundClearance = 16;
+        terrain.surface = point -> new CameraMotion.Point(point.x(), 280, point.z());
+        terrain.space = point -> point.y() >= 296 ? CLEAR : BLOCKED;
+        CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+        planner.adoptLanding("scene", lowBaseline, current);
+
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", lowBaseline, current, terrain, 1_000, false);
+
+        assertFalse(decision.waiting());
+        assertEquals(new CameraMotion.Point(12, 296, 0), planner.resolvedDestination());
+        assertEquals(new CameraMotion.Point(12, 280, 0), decision.destination());
+        assertEquals(232, planner.temporaryLift());
+        assertEquals(64, lowBaseline.position().y());
+    }
+
+    @Test
+    void missingSurfaceDataStillAllowsTheFinalWorldHeightLevelToFindADeepMountainExit() {
+        CameraMotion.Shot lowBaseline = new CameraMotion.Shot(new CameraMotion.Point(12, 64, 0), center);
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.maximumY = 317.1;
+        terrain.space = point -> point.y() >= 296 ? CLEAR : BLOCKED;
+        CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", lowBaseline,
+                new CameraMotion.Point(12, 276, 0), terrain, 1_000, false);
+
+        assertFalse(decision.waiting());
+        assertTrue(planner.resolvedDestination().y() >= 296);
+        assertTrue(planner.resolvedDestination().y() < 296.5);
+        assertTrue(planner.resolvedDestination().y() <= terrain.maximumY);
+    }
+
+    @Test
+    void aLoadedSurfaceHintWithUnknownSpaceOrViewIsNeverAdopted() {
+        for (boolean unknownSpace : new boolean[]{true, false}) {
+            ProbeTerrain terrain = new ProbeTerrain();
+            terrain.surface = point -> new CameraMotion.Point(point.x(), 280, point.z());
+            terrain.space = point -> point.y() < 290 ? BLOCKED : unknownSpace ? UNKNOWN : CLEAR;
+            terrain.view = (point, lookAt) -> unknownSpace ? CLEAR : UNKNOWN;
+            CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+
+            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended,
+                    new CameraMotion.Point(12, 276, 0), terrain, 1_000, false);
+
+            assertTrue(decision.waiting());
+            assertNull(planner.resolvedDestination());
+        }
+    }
+
+    @Test
+    void theLastMillimetersOfClimbDoNotRequireTheStartingPointToAlreadyMeetTheGroundClearance() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.space = point -> point.y() >= 122 ? CLEAR : BLOCKED;
+        CameraMotion.Point current = intended.position().offset(0, -0.005, 0);
+        CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false);
+
+        assertFalse(decision.waiting());
+        assertEquals(intended.position(), decision.destination());
+        assertEquals(BLOCKED, terrain.space(current));
+        assertEquals(CLEAR, terrain.path(current, decision.destination()));
+    }
+
+    @Test
+    void evenTheLastMillimetersCannotCrossABlockedOrUnknownPhysicalPath() {
+        for (CameraTerrainAvoidance.Clearance pathState : new CameraTerrainAvoidance.Clearance[]{BLOCKED, UNKNOWN}) {
+            ProbeTerrain terrain = new ProbeTerrain();
+            terrain.space = point -> point.y() >= 122 ? CLEAR : BLOCKED;
+            terrain.path = (from, to) -> pathState;
+            CameraMotion.Point current = intended.position().offset(0, -0.005, 0);
+            CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+
+            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false);
+
+            assertTrue(decision.waiting(), pathState.name());
+            assertEquals(current, decision.destination());
+        }
+    }
+
+    @Test
     void unavoidableClimbUsesTheLowestSafeHeightWithinHalfABlock() {
         ProbeTerrain terrain = new ProbeTerrain();
         double minimumSafeY = 128.3;
@@ -302,6 +387,8 @@ class CameraTerrainAvoidanceTest {
         Function<CameraMotion.Point, CameraTerrainAvoidance.Clearance> space = point -> CLEAR;
         BiFunction<CameraMotion.Point, CameraMotion.Point, CameraTerrainAvoidance.Clearance> path = (from, to) -> CLEAR;
         BiFunction<CameraMotion.Point, CameraMotion.Point, CameraTerrainAvoidance.Clearance> view = (point, lookAt) -> CLEAR;
+        Function<CameraMotion.Point, CameraMotion.Point> surface = point -> null;
+        double groundClearance;
         double maximumY = 320;
         int queries;
 
@@ -321,6 +408,17 @@ class CameraTerrainAvoidanceTest {
         public CameraTerrainAvoidance.Clearance view(CameraMotion.Point feet, CameraMotion.Point lookAt) {
             queries++;
             return view.apply(feet, lookAt);
+        }
+
+        @Override
+        public CameraMotion.Point surface(CameraMotion.Point feet) {
+            queries++;
+            return surface.apply(feet);
+        }
+
+        @Override
+        public double minimumGroundClearance() {
+            return groundClearance;
         }
 
         @Override

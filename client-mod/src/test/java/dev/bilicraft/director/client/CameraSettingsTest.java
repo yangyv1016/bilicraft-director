@@ -25,6 +25,9 @@ class CameraSettingsTest {
         assertEquals(4, settings.playerHeightOffset);
         assertEquals(8, settings.motionAmplitude);
         assertEquals(30, settings.turnRateDegreesPerSecond);
+        assertEquals(45, settings.maxPitchDegrees);
+        assertTrue(settings.autoDistance);
+        assertEquals(16, settings.minGroundClearance);
         assertFalse(Files.exists(path));
     }
 
@@ -40,6 +43,9 @@ class CameraSettingsTest {
         assertEquals(122, settings.heightY);
         assertEquals(4, settings.speed);
         assertEquals(7, settings.playerHeightOffset);
+        assertEquals(45, settings.maxPitchDegrees);
+        assertTrue(settings.autoDistance);
+        assertEquals(16, settings.minGroundClearance);
     }
 
     @Test
@@ -87,6 +93,7 @@ class CameraSettingsTest {
         assertEquals(4, settings.playerHeightOffset);
         assertEquals(8, settings.motionAmplitude);
         assertEquals(30, settings.turnRateDegreesPerSecond);
+        assertEquals(45, settings.maxPitchDegrees);
     }
 
     @Test
@@ -100,6 +107,9 @@ class CameraSettingsTest {
         saved.playerHeightOffset = 7;
         saved.motionAmplitude = 10;
         saved.turnRateDegreesPerSecond = 24;
+        saved.maxPitchDegrees = 38;
+        saved.autoDistance = false;
+        saved.minGroundClearance = 24;
         assertTrue(saved.save(LoggerFactory.getLogger(getClass())));
         CameraSettings loaded = new CameraSettings(path);
         loaded.load(LoggerFactory.getLogger(getClass()));
@@ -110,6 +120,9 @@ class CameraSettingsTest {
         assertEquals(saved.playerHeightOffset, loaded.playerHeightOffset);
         assertEquals(saved.motionAmplitude, loaded.motionAmplitude);
         assertEquals(saved.turnRateDegreesPerSecond, loaded.turnRateDegreesPerSecond);
+        assertEquals(saved.maxPitchDegrees, loaded.maxPitchDegrees);
+        assertFalse(loaded.autoDistance);
+        assertEquals(saved.minGroundClearance, loaded.minGroundClearance);
     }
 
     @Test
@@ -172,15 +185,90 @@ class CameraSettingsTest {
 
     @Test
     void validationRejectsNonFiniteValuesAndOutOfRangeParameters() {
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 257, 2.5, 80, 4, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 257, 4, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, -65, 4, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, Double.NaN, 2.5, 80, 4, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, Double.POSITIVE_INFINITY, 4, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 0, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 13, 8, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 4, 25, 30));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 4, 8, Double.NaN));
-        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(null, 12, 2.5, 80, 4, 8, 30));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 257, 2.5, 80, 4, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 257, 4, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, -65, 4, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, Double.NaN, 2.5, 80, 4, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, Double.POSITIVE_INFINITY, 4, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 0, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 13, 8, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 4, 25, 30, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(CameraMotion.Mode.AUTO, 12, 2.5, 80, 4, 8, Double.NaN, 45, 16));
+        assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(null, 12, 2.5, 80, 4, 8, 30, 45, 16));
+    }
+
+    @Test
+    void maximumPitchBoundsSurviveSaveAndReload() {
+        Path path = directory.resolve("camera.properties");
+        CameraSettings settings = new CameraSettings(path);
+        for (double maximumPitch : new double[]{5, 80}) {
+            settings.maxPitchDegrees = maximumPitch;
+            assertTrue(settings.save(LoggerFactory.getLogger(getClass())));
+            CameraSettings loaded = new CameraSettings(path);
+            loaded.load(LoggerFactory.getLogger(getClass()));
+
+            assertEquals(maximumPitch, loaded.maxPitchDegrees);
+        }
+    }
+
+    @Test
+    void invalidMaximumPitchIsRejectedWithoutPartiallyApplyingTheSavedPreset() throws Exception {
+        Path path = directory.resolve("camera.properties");
+        for (double invalidPitch : new double[]{4.9, 80.1, Double.NaN, Double.POSITIVE_INFINITY}) {
+            assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(
+                    CameraMotion.Mode.ORBIT, 136, 2.5, 122, 4, 8, 30, invalidPitch, 16));
+            Files.writeString(path, "camera.radius=20\ncamera.speed=4\ncamera.max-pitch=" + invalidPitch + "\n");
+            CameraSettings settings = new CameraSettings(path);
+            settings.load(LoggerFactory.getLogger(getClass()));
+
+            assertEquals(136, settings.radius);
+            assertEquals(2.5, settings.speed);
+            assertEquals(45, settings.maxPitchDegrees);
+        }
+    }
+
+    @Test
+    void invalidAutoDistanceTextDoesNotSilentlyDisableItOrApplyOtherFields() throws Exception {
+        Path path = directory.resolve("camera.properties");
+        for (String invalidBoolean : new String[]{"yes", "0", "TRUE", ""}) {
+            Files.writeString(path, "camera.radius=20\ncamera.speed=4\ncamera.auto-distance=" + invalidBoolean + "\n");
+            CameraSettings settings = new CameraSettings(path);
+            settings.load(LoggerFactory.getLogger(getClass()));
+
+            assertTrue(settings.autoDistance);
+            assertEquals(136, settings.radius);
+            assertEquals(2.5, settings.speed);
+        }
+    }
+
+    @Test
+    void groundClearanceCanBeDisabledOrSetToTheMaximumWithoutChangingAbsoluteY() {
+        Path path = directory.resolve("camera.properties");
+        CameraSettings settings = new CameraSettings(path);
+        for (double groundClearance : new double[]{0, 128}) {
+            settings.minGroundClearance = groundClearance;
+            assertTrue(settings.save(LoggerFactory.getLogger(getClass())));
+            CameraSettings loaded = new CameraSettings(path);
+            loaded.load(LoggerFactory.getLogger(getClass()));
+
+            assertEquals(groundClearance, loaded.minGroundClearance);
+            assertEquals(122, loaded.heightY);
+        }
+    }
+
+    @Test
+    void invalidGroundClearanceIsRejectedWithoutPartiallyApplyingSavedFields() throws Exception {
+        Path path = directory.resolve("camera.properties");
+        for (double invalidClearance : new double[]{-0.1, 128.1, Double.NaN, Double.POSITIVE_INFINITY}) {
+            assertThrows(IllegalArgumentException.class, () -> CameraSettings.validate(
+                    CameraMotion.Mode.ORBIT, 136, 2.5, 122, 4, 8, 30, 45, invalidClearance));
+            Files.writeString(path, "camera.height-y=80\ncamera.auto-distance=false\ncamera.min-ground-clearance=" + invalidClearance + "\n");
+            CameraSettings settings = new CameraSettings(path);
+            settings.load(LoggerFactory.getLogger(getClass()));
+
+            assertEquals(16, settings.minGroundClearance);
+            assertEquals(122, settings.heightY);
+            assertTrue(settings.autoDistance);
+        }
     }
 }

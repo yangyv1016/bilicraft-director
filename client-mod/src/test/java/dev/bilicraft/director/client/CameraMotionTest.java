@@ -25,6 +25,105 @@ class CameraMotionTest {
     }
 
     @Test
+    void comfortablePitchKeepsTheOriginalComposition() {
+        CameraMotion.Shot original = new CameraMotion.Shot(new CameraMotion.Point(136, 122, 0), center);
+
+        assertSame(original, CameraMotion.widenForPitch(original, original.position(), 0, 1.62, 45, 256));
+    }
+
+    @Test
+    void steepPitchWidensAlongTheExistingSideStartingFiveDegreesBeforeItsLimit() {
+        CameraSettings settings = settings(CameraMotion.Mode.STATIC);
+        settings.heightY = 122;
+        settings.maxPitchDegrees = 45;
+        CameraMotion.Shot original = new CameraMotion.Shot(new CameraMotion.Point(7.2, 122, 9.6), center);
+
+        CameraMotion.Shot widened = CameraMotion.widenForPitch(original, original.position(), 0,
+                1.62, settings.maxPitchDegrees, 256);
+
+        double radius = Math.hypot(widened.position().x(), widened.position().z());
+        assertEquals(40, Math.toDegrees(Math.atan2(122 + 1.62 - center.y(), radius)), 1.0E-9);
+        assertEquals(0.75, widened.position().x() / widened.position().z(), 1.0E-9);
+        assertEquals(122, widened.position().y());
+        assertSame(original.lookAt(), widened.lookAt());
+        assertEquals(new CameraMotion.Point(7.2, 122, 9.6), original.position());
+        assertEquals(12, settings.radius, "execution must not overwrite the user's saved distance");
+        assertEquals(122, settings.heightY);
+        assertEquals(45, settings.maxPitchDegrees);
+    }
+
+    @Test
+    void lookingUpAndLookingDownUseTheSamePitchMagnitude() {
+        CameraMotion.Point position = new CameraMotion.Point(12, 122, 0);
+        CameraMotion.Shot down = new CameraMotion.Shot(position, new CameraMotion.Point(0, 80, 0));
+        CameraMotion.Shot up = new CameraMotion.Shot(position, new CameraMotion.Point(0, 167.24, 0));
+
+        CameraMotion.Shot widenedDown = CameraMotion.widenForPitch(down, position, 0, 1.62, 45, 256);
+        CameraMotion.Shot widenedUp = CameraMotion.widenForPitch(up, position, 0, 1.62, 45, 256);
+
+        assertTrue(widenedDown.position().x() > position.x());
+        assertEquals(widenedDown.position().x(), widenedUp.position().x(), 1.0E-9);
+        assertSame(up.lookAt(), widenedUp.lookAt());
+    }
+
+    @Test
+    void temporaryLiftAndAHigherActualCameraBothContributeWithoutChangingThePlannedY() {
+        CameraMotion.Shot original = new CameraMotion.Shot(camera, center);
+        CameraMotion.Shot lifted = CameraMotion.widenForPitch(original, camera, 10, 1.62, 45, 256);
+        CameraMotion.Shot alreadyHigher = CameraMotion.widenForPitch(original,
+                new CameraMotion.Point(12, 100, 0), 10, 1.62, 45, 256);
+
+        assertEquals((84 + 10 + 1.62 - 80) / Math.tan(Math.toRadians(40)), lifted.position().x(), 1.0E-9);
+        assertEquals((100 + 1.62 - 80) / Math.tan(Math.toRadians(40)), alreadyHigher.position().x(), 1.0E-9);
+        assertEquals(84, lifted.position().y());
+        assertEquals(84, alreadyHigher.position().y());
+    }
+
+    @Test
+    void automaticDistanceRespectsTheSeparateSceneAndPlayerEnvelopes() {
+        CameraMotion.Shot original = new CameraMotion.Shot(new CameraMotion.Point(12, 500, 0), center);
+
+        CameraMotion.Shot scene = CameraMotion.widenForPitch(original, original.position(), 0, 1.62, 45, 256);
+        CameraMotion.Shot player = CameraMotion.widenForPitch(original, original.position(), 0, 1.62, 45, 24);
+
+        assertEquals(256, scene.position().x());
+        assertEquals(24, player.position().x());
+        assertEquals(500, scene.position().y());
+        assertEquals(500, player.position().y());
+        CameraMotion.Shot alreadyAtLimit = new CameraMotion.Shot(scene.position(), center);
+        assertSame(alreadyAtLimit, CameraMotion.widenForPitch(alreadyAtLimit, scene.position(), 0, 1.62, 45, 256));
+    }
+
+    @Test
+    void lowestPitchLimitKeepsAFiniteFiveDegreeWideningThreshold() {
+        CameraMotion.Shot original = new CameraMotion.Shot(camera, center);
+
+        CameraMotion.Shot widened = CameraMotion.widenForPitch(original, camera, 0, 1.62, 5, 256);
+
+        assertEquals((84 + 1.62 - 80) / Math.tan(Math.toRadians(5)), widened.position().x(), 1.0E-9);
+        assertTrue(Double.isFinite(widened.position().x()));
+    }
+
+    @Test
+    void zeroHorizontalShotUsesTheActualSideOrPositiveXWhenBothAreCentered() {
+        CameraMotion.Shot original = new CameraMotion.Shot(new CameraMotion.Point(0, 122, 0), center);
+
+        CameraMotion.Shot actualSide = CameraMotion.widenForPitch(original,
+                new CameraMotion.Point(0, 122, -12), 0, 1.62, 45, 256);
+        CameraMotion.Shot centered = CameraMotion.widenForPitch(original, original.position(), 0, 1.62, 45, 256);
+
+        assertEquals(0, actualSide.position().x());
+        assertTrue(actualSide.position().z() < 0);
+        assertEquals(0, centered.position().z());
+        assertTrue(centered.position().x() > 0);
+        for (CameraMotion.Shot shot : new CameraMotion.Shot[]{actualSide, centered}) {
+            assertTrue(Double.isFinite(shot.position().x()));
+            assertTrue(Double.isFinite(shot.position().z()));
+            assertEquals(122, shot.position().y());
+        }
+    }
+
+    @Test
     void allModesProduceFiniteShotsAcrossSeveralCycles() {
         for (CameraMotion.Mode mode : CameraMotion.Mode.values()) {
             CameraSettings settings = settings(mode);

@@ -8,14 +8,17 @@ final class CameraTerrainAvoidance {
         Clearance space(CameraMotion.Point feet);
         Clearance path(CameraMotion.Point from, CameraMotion.Point to);
         Clearance view(CameraMotion.Point feet, CameraMotion.Point lookAt);
+        /** Highest non-air block at this X/Z, or null if its loaded heightmap is unavailable. */
+        CameraMotion.Point surface(CameraMotion.Point feet);
+        double minimumGroundClearance();
         double maxY();
     }
 
     record Decision(CameraMotion.Point destination, boolean waiting, boolean adjusted) { }
     private record Pose(CameraMotion.Point point, double angle) { }
     private record Step(CameraMotion.Point point, boolean blocked) { }
-    private static final double[] ANGLES = {0, 15, -15, 30, -30, 60, -60, 90, -90, 120, -120, 180};
-    private static final double[] HEIGHTS = {1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 192};
+    static final double[] ANGLES = {0, 15, -15, 30, -30, 60, -60, 90, -90, 120, -120, 180};
+    static final double[] HEIGHTS = {1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 192};
     private String subjectId;
     private long nextPlanAt;
     private long previousPlanAt;
@@ -111,15 +114,26 @@ final class CameraTerrainAvoidance {
         Pose pose = sameHeight(intended, 0, terrain, 0);
         if (pose == null) pose = raised(intended, terrain);
         if (pose == null) return null;
-        angle = pose.angle();
-        lift = Math.max(0, pose.point().y() - intended.position().y());
+        adoptLanding(id, intended, pose.point());
+        return pose.point();
+    }
+
+    void adoptLanding(String id, CameraMotion.Shot intended, CameraMotion.Point point) {
+        if (!id.equals(subjectId)) {
+            reset();
+            subjectId = id;
+        }
+        double originalAngle = Math.atan2(intended.position().z() - intended.lookAt().z(),
+                intended.position().x() - intended.lookAt().x());
+        double landingAngle = Math.atan2(point.z() - intended.lookAt().z(), point.x() - intended.lookAt().x());
+        angle = Math.IEEEremainder(Math.toDegrees(landingAngle - originalAngle), 360);
+        lift = Math.max(0, point.y() - intended.position().y());
         nextPlanAt = 0;
         previousPlanAt = 0;
         baseClearSince = -1;
         originalClearSince = -1;
         previous = null;
-        resolvedDestination = pose.point();
-        return pose.point();
+        resolvedDestination = point;
     }
 
     private Decision remember(CameraMotion.Point destination, CameraMotion.Point intended) {
@@ -141,9 +155,18 @@ final class CameraTerrainAvoidance {
     }
 
     private Pose raised(CameraMotion.Shot intended, Terrain terrain) {
+        for (double offset : new double[]{angle, angle + 30, angle - 30}) {
+            CameraMotion.Point surface = terrain.surface(offset(intended, offset, 0));
+            if (surface == null) continue;
+            double height = Math.min(terrain.maxY(), Math.max(intended.position().y(),
+                    surface.y() + Math.max(10, terrain.minimumGroundClearance()))) - intended.position().y();
+            CameraMotion.Point point = offset(intended, offset, height);
+            if (clearPose(point, intended.lookAt(), terrain)) return new Pose(point, offset);
+        }
         double previousHeight = 0;
-        for (double height : HEIGHTS) {
-            height = Math.min(height, terrain.maxY() - intended.position().y());
+        double maximumHeight = terrain.maxY() - intended.position().y();
+        for (int level = 0; level <= HEIGHTS.length; level++) {
+            double height = level == HEIGHTS.length ? maximumHeight : Math.min(HEIGHTS[level], maximumHeight);
             if (height <= previousHeight) break;
             // The full same-height ring was tried first. Vertical search stays on the current/nearest side.
             for (double offset : new double[]{angle, angle + 30, angle - 30}) {
@@ -164,7 +187,8 @@ final class CameraTerrainAvoidance {
 
     private Step steer(CameraMotion.Point current, CameraMotion.Point goal, Terrain terrain) {
         double distance = distance(current, goal);
-        if (distance < 0.01) return new Step(terrain.space(current) == Clearance.CLEAR ? goal : null, false);
+        if (distance < 0.01) return new Step(terrain.space(goal) == Clearance.CLEAR
+                && terrain.path(current, goal) == Clearance.CLEAR ? goal : null, false);
         double scale = Math.min(1, 4 / distance);
         double dx = (goal.x() - current.x()) * scale;
         double dy = (goal.y() - current.y()) * scale;
@@ -192,11 +216,11 @@ final class CameraTerrainAvoidance {
         return new Step(null, blocked);
     }
 
-    private static boolean clearPose(CameraMotion.Point point, CameraMotion.Point lookAt, Terrain terrain) {
+    static boolean clearPose(CameraMotion.Point point, CameraMotion.Point lookAt, Terrain terrain) {
         return terrain.space(point) == Clearance.CLEAR && terrain.view(point, lookAt) == Clearance.CLEAR;
     }
 
-    private static CameraMotion.Point offset(CameraMotion.Shot intended, double degrees, double height) {
+    static CameraMotion.Point offset(CameraMotion.Shot intended, double degrees, double height) {
         if (degrees == 0) return intended.position().offset(0, height, 0);
         double dx = intended.position().x() - intended.lookAt().x();
         double dz = intended.position().z() - intended.lookAt().z();

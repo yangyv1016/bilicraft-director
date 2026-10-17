@@ -304,6 +304,9 @@
                                 <label>跟拍高度 <output id="livePlayerHeightOffsetValue">4 格</output><input id="livePlayerHeightOffset" data-camera-setting="playerHeightOffset" aria-label="实时玩家跟拍高度偏移" type="range" min="1" max="12" step="0.5" value="4" disabled></label>
                                 <label>幅度 <output id="liveMotionAmplitudeValue">8 格</output><input id="liveMotionAmplitude" data-camera-setting="motionAmplitude" aria-label="实时运动幅度" type="range" min="2" max="24" step="0.5" value="8" disabled></label>
                                 <label>转向 <output id="liveTurnRateDegreesPerSecondValue">30 度/秒</output><input id="liveTurnRateDegreesPerSecond" data-camera-setting="turnRateDegreesPerSecond" aria-label="实时转向速度" type="range" min="6" max="80" step="1" value="30" disabled></label>
+                                <label class="live-pitch-control">最大俯仰 <output id="liveMaxPitchDegreesValue">45 度</output><input id="liveMaxPitchDegrees" data-camera-setting="maxPitchDegrees" aria-label="实时最大俯仰角" type="range" min="5" max="80" step="1" value="45" disabled></label>
+                                <label class="live-ground-control">最低离地 <output id="liveMinGroundClearanceValue">16 格</output><input id="liveMinGroundClearance" data-camera-setting="minGroundClearance" aria-label="实时场景最低离地高度" type="range" min="0" max="128" step="1" value="16" disabled></label>
+                                <label class="live-auto-distance"><input id="liveAutoDistance" type="checkbox" checked disabled><span>俯仰过陡时自动拉远</span></label>
                             </div>
                         </section>
                         <div class="map-canvas-wrap" id="mapContainer">
@@ -442,6 +445,20 @@
                                         <input id="turnRateDegreesPerSecondRange" type="range" min="6" max="80" step="1" value="30">
                                         <input id="turnRateDegreesPerSecondNumber" type="number" min="6" max="80" step="any" required value="30" aria-label="转向速度上限数值">
                                     </div>
+                                    <label class="slider-label" for="maxPitchDegreesRange">最大俯仰角 <span>度</span></label>
+                                    <div class="slider-control">
+                                        <input id="maxPitchDegreesRange" type="range" min="5" max="80" step="1" value="45">
+                                        <input id="maxPitchDegreesNumber" type="number" min="5" max="80" step="any" required value="45" aria-label="最大俯仰角数值">
+                                    </div>
+                                    <p class="field-help">默认 45°，可设置 5–80°；同时限制向上和向下俯仰，避免镜头过陡。服务器挂机点保持管理员保存的原始位姿。</p>
+                                    <label class="slider-label" for="minGroundClearanceRange">场景最低离地高度 <span>格</span></label>
+                                    <div class="slider-control">
+                                        <input id="minGroundClearanceRange" type="range" min="0" max="128" step="1" value="16">
+                                        <input id="minGroundClearanceNumber" type="number" min="0" max="128" step="any" required value="16" aria-label="场景最低离地高度数值">
+                                    </div>
+                                    <p class="field-help">默认 16 格，范围 0–128 格，0 为关闭。按镜头脚下真实地表临时抬升，不修改保存的场景 Y；玩家跟拍和服务器挂机点不使用此项。</p>
+                                    <label class="checkbox-row"><input id="autoDistance" type="checkbox" checked><span>俯仰过陡时自动增加镜头距离</span></label>
+                                    <p class="field-help">默认开启，按照最大俯仰角拉远机位；机位仍须满足世界边界、排除区及地形检查。</p>
                                     <div class="form-actions">
                                         <button id="saveCamera" class="button" type="submit" disabled>应用并保存</button>
                                         <button class="text-button" id="resetCamera" type="button">放弃草稿</button>
@@ -452,7 +469,7 @@
                             </section>
                             <aside class="configuration-notes">
                                 <h3>应用范围</h3>
-                                <p>默认使用环绕：距离 136 格、速度 2.5 格 / 秒、场景 Y=122、跟拍高度 4 格、幅度 8 格、转向 30 度 / 秒。已保存的参数优先。</p>
+                                <p>默认使用环绕：距离 136 格、速度 2.5 格 / 秒、场景 Y=122、跟拍高度 4 格、幅度 8 格、转向 30 度 / 秒、最大俯仰 45°、场景最低离地 16 格。已保存的参数优先。</p>
                                 <p>应用并保存后，由 Mod 的同一运镜入口执行。不会启动已经停止的导播。</p>
                                 <dl>
                                     <dt>镜头距离</dt>
@@ -463,6 +480,10 @@
                                     <dd>场景绝对 Y 为 −64–256，默认 122，机位仍须位于当前世界高度范围内。玩家跟拍高度为 1–12 格，默认 4 格，随玩家升降。运动幅度仍为 2–24 格。</dd>
                                     <dt>转向速度</dt>
                                     <dd>6–80 度 / 秒，越低转头越舒缓。移动速度与转头速度独立调整。</dd>
+                                    <dt>最大俯仰角</dt>
+                                    <dd>5–80°，默认 45°，上下对称限制；仅限制观察角度，不修改景点坐标或服务器挂机点。</dd>
+                                    <dt>场景最低离地高度</dt>
+                                    <dd>0–128 格，默认 16 格；0 关闭。读取镜头脚下地表临时抬升，保存的绝对 Y 保持原值。玩家跟拍和服务器挂机点例外。</dd>
                                 </dl>
                                 <p>固定机位和摇镜会先平滑前往机位，再保持位置。跟拍用于玩家时保持后侧构图；用于场景时保持入镜方向。</p>
                                 <p>输入界面、玩家预告或权限条件需要暂停时，运镜会继续服从客户端与服务器检查。</p>

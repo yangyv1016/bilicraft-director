@@ -80,6 +80,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private final CameraTerrainAvoidance terrainAvoidance = new CameraTerrainAvoidance();
     private CameraTerrainAvoidance.Decision terrainDecision;
     private int terrainLandingAttempts;
+    private CameraLandingSearch terrainLandingSearch;
+    private long terrainLandingDeadline;
     private CameraMotion.Point lastSafeCameraPosition;
     private boolean terrainReturning;
     private final CameraTerrainRecovery terrainRecovery = new CameraTerrainRecovery();
@@ -779,6 +781,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private void clearMapState() {
         terrainAvoidance.reset();
         terrainDecision = null;
+        terrainLandingSearch = null;
         lastSafeCameraPosition = null;
         terrainReturning = false;
         terrainRecovery.reset();
@@ -1162,6 +1165,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 activeScene = null;
                 sceneArrival = null;
+                terrainLandingSearch = null;
                 retreatUntil = 0;
                 shotTransition.clear();
                 stopMotion();
@@ -1267,21 +1271,32 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                         ? sceneArrival.arrived(actual, sceneChunksLoaded(client, arrivalPosition))
                         : sceneChunksLoaded(client, arrivalPosition) && new Vec3d(actual.x(), actual.y(), actual.z())
                         .squaredDistanceTo(arrivalPosition.x(), arrivalPosition.y(), arrivalPosition.z()) <= 1;
+                boolean reachedDestination = arrived;
                 if (arrived && !idle) {
-                    CameraTerrainWorld terrain = new CameraTerrainWorld(client.player, worldExclusions());
+                    CameraTerrainWorld terrain = new CameraTerrainWorld(client.player, worldExclusions(),
+                            terrainReturning ? 0 : settings.minGroundClearance);
                     CameraMotion.Point lookAt = new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z());
                     arrived = terrain.space(actual) == CameraTerrainAvoidance.Clearance.CLEAR
                             && (terrainReturning || terrain.view(actual, lookAt) == CameraTerrainAvoidance.Clearance.CLEAR);
-                    if (!arrived && sceneArrival.teleport() && !terrainReturning && terrainLandingAttempts < 2) {
-                        CameraMotion.Point safe = terrainAvoidance.landing(new ShowcaseTarget.Scene(activeScene).id(),
-                                new CameraMotion.Shot(sceneArrival.destination(), lookAt), terrain);
-                        if (safe != null) {
-                            sceneArrival = new SceneArrival(safe, now);
-                            terrainLandingAttempts++;
-                            status = "遮罩内修正受地形遮挡的传送机位";
-                        }
+                    if (!arrived && sceneArrival.teleport() && !terrainReturning && terrainLandingSearch == null) {
+                        terrainLandingSearch = new CameraLandingSearch(new CameraMotion.Shot(sceneArrival.destination(), lookAt));
+                        terrainLandingDeadline = now + 5_000;
+                        status = "落点受地形遮挡，正在遮罩内分批搜索同高及更高机位";
                     }
                     keepTerrainCovered = !arrived && sceneArrival.teleport();
+                }
+                if (!paused && !arrived && !terrainReturning && terrainLandingSearch != null
+                        && now < terrainLandingDeadline && terrainLandingAttempts < 6
+                        && (reachedDestination || sceneArrival.timedOut(now))) {
+                    CameraMotion.Point safe = terrainLandingSearch.poll(
+                            new CameraTerrainWorld(client.player, worldExclusions(), settings.minGroundClearance), now);
+                    if (safe != null) {
+                        terrainAvoidance.adoptLanding(new ShowcaseTarget.Scene(activeScene).id(), terrainLandingSearch.intended(), safe);
+                        sceneArrival = new SceneArrival(safe, now);
+                        reachedDestination = false;
+                        terrainLandingAttempts++;
+                        status = "已找到安全机位，正在遮罩内修正传送（第" + terrainLandingAttempts + "次）";
+                    }
                 }
                 if (arrived && terrainReturning) {
                     terrainReturning = false;
@@ -1290,12 +1305,22 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     keepTerrainCovered = false;
                     status = "没有可用的安全构图，已返回先前安全机位并跳过";
                 } else if (arrived) {
+                    if (!idle && terrainLandingSearch != null) {
+                        // CameraMotion starts its new orbit from the actual arrival angle, including edits made during TP.
+                        terrainAvoidance.adoptLanding(new ShowcaseTarget.Scene(activeScene).id(),
+                                new CameraMotion.Shot(new CameraMotion.Point(actual.x(), settings.heightY, actual.z()),
+                                        new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z())), actual);
+                    }
                     sceneArrival = null;
+                    terrainLandingSearch = null;
                     cameraMotion.reset();
                     status = "已到达，正在展示 " + activeScene.name();
-                } else if (sceneArrival.timedOut(now)) {
+                } else if (terrainLandingSearch == null ? sceneArrival.timedOut(now)
+                        : (now >= terrainLandingDeadline || terrainLandingAttempts >= 6)
+                        && (reachedDestination || sceneArrival.timedOut(now))) {
                     if (!idle && sceneArrival.teleport() && !terrainReturning && lastSafeCameraPosition != null) {
                         sceneArrival = new SceneArrival(lastSafeCameraPosition, now);
+                        terrainLandingSearch = null;
                         terrainReturning = true;
                         status = "安全机位不可用，正在遮罩下返回先前已确认机位";
                     } else {
@@ -1317,6 +1342,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 activeScene = null;
                 sceneArrival = null;
+                terrainLandingSearch = null;
                 if (arrivingThisTick && !keepTerrainCovered) shotTransition.reveal(now);
                 showcaseQueue.finishCurrent();
                 stopMotion();
@@ -1391,6 +1417,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         showcaseQueue.finishCurrent();
         activeScene = null;
         sceneArrival = null;
+        terrainLandingSearch = null;
         shotTransition.clear();
         stopMotion();
         MinecraftClient client = MinecraftClient.getInstance();
@@ -1474,6 +1501,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     public void stop(String reason) {
         terrainAvoidance.reset();
         terrainDecision = null;
+        terrainLandingSearch = null;
         terrainReturning = false;
         terrainRecovery.reset();
         shotTransition.clear();
@@ -1637,6 +1665,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         terrainAvoidance.reset();
         terrainDecision = null;
         terrainLandingAttempts = 0;
+        terrainLandingSearch = null;
         terrainReturning = false;
         terrainRecovery.reset();
         if (target instanceof ShowcaseTarget.Player player) {
@@ -1896,9 +1925,16 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         CameraMotion.Shot shot = sceneArrival == null ? cameraMotion.sample(subject,
                 new CameraMotion.Point(player.getX(), player.getY(), player.getZ()), settings)
                 : new CameraMotion.Shot(sceneArrival.destination(), subject.center());
+        if (sceneArrival == null && settings.autoDistance) {
+            double currentRadius = Math.hypot(player.getX() - shot.lookAt().x(), player.getZ() - shot.lookAt().z());
+            double maximumDistance = Math.min(subject.player() ? 24 : 256, Math.max(settings.radius, currentRadius) + 16);
+            shot = CameraMotion.widenForPitch(shot, new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
+                    terrainAvoidance.temporaryLift(), player.getEyePos().y - player.getY(), settings.maxPitchDegrees, maximumDistance);
+        }
         terrainDecision = terrainAvoidance.plan(subject.id(), shot,
                 new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
-                new CameraTerrainWorld(player, worldExclusions()), now, sceneArrival != null);
+                new CameraTerrainWorld(player, worldExclusions(), subject.player() ? 0 : settings.minGroundClearance),
+                now, sceneArrival != null);
         if (terrainDecision.waiting()) {
             stopMotion();
             status = "等待已加载地形中的安全机位或绕行路线";
@@ -1923,7 +1959,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         Vec3d delta = desired.subtract(player.getEntityPos());
         Vec3d sight = lookAt.subtract(player.getEyePos());
         float yaw = (float) Math.toDegrees(Math.atan2(sight.z, sight.x)) - 90;
-        float pitch = (float) -Math.toDegrees(Math.atan2(sight.y, Math.sqrt(sight.x * sight.x + sight.z * sight.z)));
+        float pitch = (float) Math.clamp(-Math.toDegrees(Math.atan2(sight.y, Math.sqrt(sight.x * sight.x + sight.z * sight.z))),
+                -settings.maxPitchDegrees, settings.maxPitchDegrees);
         if (shotTransition.preparing()) {
             if (new CameraTerrainWorld(player, worldExclusions()).space(
                     new CameraMotion.Point(player.getX(), player.getY(), player.getZ())) != CameraTerrainAvoidance.Clearance.CLEAR) {
@@ -1965,7 +2002,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         lastSafeCameraPosition = new CameraMotion.Point(player.getX(), player.getY(), player.getZ());
         float turnLimit = (float) (settings.turnRateDegreesPerSecond / 20);
         player.setYaw(player.getYaw() + MathHelper.clamp(MathHelper.wrapDegrees(yaw - player.getYaw()), -turnLimit, turnLimit));
-        player.setPitch(player.getPitch() + MathHelper.clamp(pitch - player.getPitch(), -turnLimit * 2 / 3, turnLimit * 2 / 3));
+        player.setPitch((float) Math.clamp(player.getPitch()
+                + MathHelper.clamp(pitch - player.getPitch(), -turnLimit * 2 / 3, turnLimit * 2 / 3),
+                -settings.maxPitchDegrees, settings.maxPitchDegrees));
     }
 
     private void revealShot(ClientPlayerEntity player, float yaw, float pitch, long now) {
@@ -2124,6 +2163,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         terrain.addProperty("adjusted", terrainDecision != null && terrainDecision.adjusted());
         terrain.addProperty("temporaryLift", terrainAvoidance.temporaryLift());
         terrain.addProperty("returning", terrainReturning);
+        terrain.addProperty("landingSearch", terrainLandingSearch != null);
+        terrain.addProperty("landingAttempts", terrainLandingAttempts);
         state.add("terrain", terrain);
         JsonObject observation = new JsonObject();
         observation.addProperty("state", remoteAllowed ? observeState.name() : ObserveState.ENDED.name());
@@ -2139,6 +2180,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         motion.addProperty("playerHeightOffset", settings.playerHeightOffset);
         motion.addProperty("motionAmplitude", settings.motionAmplitude);
         motion.addProperty("turnRateDegreesPerSecond", settings.turnRateDegreesPerSecond);
+        motion.addProperty("maxPitchDegrees", settings.maxPitchDegrees);
+        motion.addProperty("minGroundClearance", settings.minGroundClearance);
+        motion.addProperty("autoDistance", settings.autoDistance);
         state.add("settings", motion);
         JsonObject ai = new JsonObject();
         ai.addProperty("provider", aiSettings.selected.name());
@@ -2332,7 +2376,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 case "queueSettings" -> Set.of("action", "autoFill", "bufferSize", "sceneDurationSeconds");
                 case "webSettings" -> Set.of("action", "port");
                 case "camera" -> Set.of("action", "radius", "speed", "mode", "heightY", "playerHeightOffset", "motionAmplitude",
-                        "turnRateDegreesPerSecond", "persist");
+                        "turnRateDegreesPerSecond", "maxPitchDegrees", "minGroundClearance", "autoDistance", "persist");
                 case "ai" -> Set.of("action", "provider", "baseUrl", "model", "apiKey", "clearKey", "enabled");
                 case "aiTest" -> Set.of("action");
                 default -> throw new IllegalArgumentException("Unknown action");
@@ -2542,7 +2586,22 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     double playerHeightOffset = commandNumber(command, "playerHeightOffset");
                     double amplitude = commandNumber(command, "motionAmplitude");
                     double turnRate = commandNumber(command, "turnRateDegreesPerSecond");
-                    CameraSettings.validate(mode, radius, speed, heightY, playerHeightOffset, amplitude, turnRate);
+                    double maxPitch = command.has("maxPitchDegrees") ? commandNumber(command, "maxPitchDegrees") : settings.maxPitchDegrees;
+                    double minGroundClearance = command.has("minGroundClearance")
+                            ? commandNumber(command, "minGroundClearance") : settings.minGroundClearance;
+                    boolean autoDistance = settings.autoDistance;
+                    if (command.has("autoDistance")) {
+                        JsonElement value = command.get("autoDistance");
+                        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean()) {
+                            throw new IllegalArgumentException("Invalid autoDistance");
+                        }
+                        autoDistance = value.getAsBoolean();
+                    }
+                    CameraSettings.validate(mode, radius, speed, heightY, playerHeightOffset, amplitude, turnRate, maxPitch, minGroundClearance);
+                    boolean poseChanged = mode != settings.mode || radius != settings.radius || heightY != settings.heightY
+                            || playerHeightOffset != settings.playerHeightOffset || amplitude != settings.motionAmplitude
+                            || minGroundClearance != settings.minGroundClearance;
+                    boolean replanFlight = sceneArrival != null && !sceneArrival.teleport() && speed != settings.speed;
                     settings.mode = mode;
                     settings.radius = radius;
                     settings.speed = speed;
@@ -2550,13 +2609,26 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     settings.playerHeightOffset = playerHeightOffset;
                     settings.motionAmplitude = amplitude;
                     settings.turnRateDegreesPerSecond = turnRate;
-                    terrainAvoidance.reset();
-                    terrainDecision = null;
-                    if (sceneArrival != null && !sceneArrival.teleport() && activeScene != null) {
-                        sceneArrival = SceneArrival.planFlight(
-                                new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ()),
-                                new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z()),
-                                radius, heightY, speed, System.currentTimeMillis());
+                    settings.maxPitchDegrees = maxPitch;
+                    settings.minGroundClearance = minGroundClearance;
+                    settings.autoDistance = autoDistance;
+                    if (poseChanged || replanFlight) {
+                        terrainAvoidance.reset();
+                        terrainDecision = null;
+                        if (sceneArrival != null && !sceneArrival.teleport() && activeScene != null) {
+                            sceneArrival = SceneArrival.planFlight(
+                                    new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ()),
+                                    new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z()),
+                                    radius, heightY, speed, System.currentTimeMillis());
+                        } else if (sceneArrival == null && activeScene != null && client.player != null && client.world != null
+                                && (idlePoint == null || !idlePoint.matches(activeScene))) {
+                            CameraMotion.Point actual = new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ());
+                            if (new CameraTerrainWorld(client.player, worldExclusions()).space(actual) == CameraTerrainAvoidance.Clearance.CLEAR) {
+                                terrainAvoidance.adoptLanding(new ShowcaseTarget.Scene(activeScene).id(),
+                                        new CameraMotion.Shot(new CameraMotion.Point(actual.x(), heightY, actual.z()),
+                                                new CameraMotion.Point(activeScene.x(), activeScene.y(), activeScene.z())), actual);
+                            }
+                        }
                     }
                     cameraSettingsSaved = false;
                     if (!persist) {

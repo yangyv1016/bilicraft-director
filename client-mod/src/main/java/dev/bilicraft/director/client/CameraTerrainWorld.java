@@ -10,7 +10,10 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
+import net.minecraft.world.Heightmap;
 import net.minecraft.world.RaycastContext;
+import net.minecraft.world.chunk.ChunkStatus;
+import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.List;
 
@@ -21,14 +24,20 @@ final class CameraTerrainWorld implements CameraTerrainAvoidance.Terrain {
     private final Box localBox;
     private final Vec3d eyeOffset;
     private final List<Message.RegionBounds> exclusions;
+    private final double minimumGroundClearance;
     private long remainingScans = 8_192;
 
     CameraTerrainWorld(ClientPlayerEntity player, List<Message.RegionBounds> exclusions) {
+        this(player, exclusions, 0);
+    }
+
+    CameraTerrainWorld(ClientPlayerEntity player, List<Message.RegionBounds> exclusions, double minimumGroundClearance) {
         world = MinecraftClient.getInstance().world;
         Vec3d feet = player.getEntityPos();
         localBox = player.getBoundingBox().offset(feet.multiply(-1)).expand(0.1);
         eyeOffset = player.getEyePos().subtract(feet);
         this.exclusions = exclusions;
+        this.minimumGroundClearance = minimumGroundClearance;
     }
 
     @Override
@@ -42,8 +51,13 @@ final class CameraTerrainWorld implements CameraTerrainAvoidance.Terrain {
             return CameraTerrainAvoidance.Clearance.UNKNOWN;
         }
         // A null entity selects ShapeContext.absent(), independently of spectator/noClip.
-        return world.isBlockSpaceEmpty(null, occupied)
-                ? CameraTerrainAvoidance.Clearance.CLEAR : CameraTerrainAvoidance.Clearance.BLOCKED;
+        if (!world.isBlockSpaceEmpty(null, occupied)) return CameraTerrainAvoidance.Clearance.BLOCKED;
+        if (minimumGroundClearance > 0) {
+            CameraMotion.Point surface = surface(feet);
+            if (surface == null) return CameraTerrainAvoidance.Clearance.UNKNOWN;
+            if (feet.y() < surface.y() + minimumGroundClearance) return CameraTerrainAvoidance.Clearance.BLOCKED;
+        }
+        return CameraTerrainAvoidance.Clearance.CLEAR;
     }
 
     @Override
@@ -89,6 +103,23 @@ final class CameraTerrainWorld implements CameraTerrainAvoidance.Terrain {
         return world.raycast(new RaycastContext(eye, end, RaycastContext.ShapeType.VISUAL,
                 RaycastContext.FluidHandling.NONE, ShapeContext.absent())).getType() == HitResult.Type.MISS
                 ? CameraTerrainAvoidance.Clearance.CLEAR : CameraTerrainAvoidance.Clearance.BLOCKED;
+    }
+
+    @Override
+    public CameraMotion.Point surface(CameraMotion.Point feet) {
+        int x = MathHelper.floor(feet.x());
+        int z = MathHelper.floor(feet.z());
+        if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4) || remainingScans < 1) return null;
+        WorldChunk chunk = world.getChunkManager().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, false);
+        // Never populate a missing heightmap: that would scan the whole chunk outside this pass's budget.
+        if (chunk == null || !chunk.hasHeightmap(Heightmap.Type.WORLD_SURFACE)) return null;
+        remainingScans--;
+        return new CameraMotion.Point(feet.x(), chunk.sampleHeightmap(Heightmap.Type.WORLD_SURFACE, x & 15, z & 15), feet.z());
+    }
+
+    @Override
+    public double minimumGroundClearance() {
+        return minimumGroundClearance;
     }
 
     @Override
