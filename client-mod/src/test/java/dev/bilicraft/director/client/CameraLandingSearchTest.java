@@ -288,7 +288,7 @@ class CameraLandingSearchTest {
         planner.adoptLanding("scene", search.intended(), repaired);
         terrain.beginPass();
 
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, repaired, terrain, 20_000, false);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, repaired, terrain, 20_000, false, Double.NEGATIVE_INFINITY);
 
         assertFalse(decision.waiting());
         assertEquals(repaired, decision.destination());

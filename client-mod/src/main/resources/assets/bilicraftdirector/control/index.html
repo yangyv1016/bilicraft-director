@@ -771,7 +771,7 @@
                 </section>
             </main>
         </div>
-        <section id="logPanel" class="log-panel collapsed" aria-label="游戏聊天与命令记录">
+        <section id="logPanel" class="log-panel collapsed" aria-label="游戏聊天与事件操作记录">
             <div class="log-heading">
                 <button id="chatToggle" class="log-toggle" aria-expanded="false" aria-controls="chatPanel">
                     <span class="chevron">⌃</span>
@@ -780,11 +780,19 @@
                 </button>
                 <button id="logToggle" class="log-toggle" aria-expanded="false" aria-controls="commandLog">
                     <span class="chevron">⌃</span>
-                    <strong>命令记录</strong>
+                    <strong>事件与操作</strong>
                     <span id="logCount" class="count">0</span>
                 </button>
-                <span id="logLatest" class="log-latest">本地会话记录，不记录配对信息与密钥</span>
-                <button id="clearLogs" class="text-button">清空</button>
+                <span id="logLatest" class="log-latest">观察事件由客户端保留，刷新页面可恢复；不记录配对信息与密钥</span>
+                <button id="clearLogs" class="text-button" title="只清除当前页面显示，不删除客户端内存中的观察事件">清空显示</button>
+            </div>
+            <div id="logTools" class="log-tools" hidden>
+                <div class="log-filters" role="group" aria-label="事件记录筛选">
+                    <button class="active" data-log-filter="all" aria-pressed="true">全部</button>
+                    <button data-log-filter="observation" aria-pressed="false">玩家观察</button>
+                </div>
+                <span id="observationHistoryStatus">等待客户端同步观察事件</span>
+                <button id="exportObservationEvents" class="text-button" title="导出客户端当前内存中的最近200条观察事件，不受当前筛选或清空显示影响；关闭客户端后仅能从游戏日志查找此前事件" disabled>导出观察记录</button>
             </div>
             <div id="chatPanel" class="chat-panel" hidden>
                 <div class="chat-status-row">

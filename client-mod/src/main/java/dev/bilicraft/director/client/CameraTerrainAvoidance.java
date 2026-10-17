@@ -52,7 +52,7 @@ final class CameraTerrainAvoidance {
     }
 
     Decision plan(String id, CameraMotion.Shot intended, CameraMotion.Point current,
-                  Terrain terrain, long now, boolean travelling) {
+                  Terrain terrain, long now, boolean travelling, double minimumRouteY) {
         if (!id.equals(subjectId)) {
             reset();
             subjectId = id;
@@ -61,6 +61,11 @@ final class CameraTerrainAvoidance {
         double elapsed = previousPlanAt == 0 ? 0 : Math.clamp((now - previousPlanAt) / 1000.0, 0, 0.5);
         previousPlanAt = now;
         nextPlanAt = now + 250;
+        CameraMotion.Point baselinePosition = intended.position();
+        double groundLift = Math.max(0, minimumRouteY - baselinePosition.y());
+        if (groundLift > 0) {
+            intended = new CameraMotion.Shot(baselinePosition.offset(0, groundLift, 0), intended.lookAt());
+        }
         Pose base = sameHeight(intended, 0, terrain, 0);
         Step baseStep = base == null ? new Step(null, false) : steer(current, base.point(), terrain);
         if (base != null && baseStep.point() != null) {
@@ -74,8 +79,7 @@ final class CameraTerrainAvoidance {
         if (lift > 0) {
             double recoveringLift = baseClearSince >= 0 && now - baseClearSince >= 2_000
                     ? Math.max(0, lift - elapsed * 0.5) : lift;
-            chosen = sameHeight(intended, recoveringLift, terrain, angle);
-            if (chosen != null) lift = recoveringLift;
+            chosen = sameHeight(intended, Math.max(0, recoveringLift - groundLift), terrain, angle);
         } else if (angle != 0 && (originalClearSince < 0 || now - originalClearSince < 2_000)) {
             CameraMotion.Point held = offset(intended, angle, 0);
             if (clearPose(held, intended.lookAt(), terrain)) chosen = new Pose(held, angle);
@@ -84,22 +88,22 @@ final class CameraTerrainAvoidance {
         resolvedDestination = chosen == null ? null : chosen.point();
         if (chosen != null) {
             angle = chosen.angle();
-            lift = Math.max(0, chosen.point().y() - intended.position().y());
+            lift = Math.max(0, chosen.point().y() - baselinePosition.y());
             Step step = steer(current, chosen.point(), terrain);
-            if (step.point() != null) return remember(step.point(), intended.position());
+            if (step.point() != null) return remember(step.point(), baselinePosition);
             if (step.blocked()) {
                 // An enclosure can have a clear remote pose but no reachable horizontal exit.
                 CameraMotion.Point up = current.offset(0, 2, 0);
                 if (up.y() <= terrain.maxY() && terrain.path(current, up) == Clearance.CLEAR) {
-                    lift = Math.max(lift, up.y() - intended.position().y());
+                    lift = Math.max(lift, up.y() - baselinePosition.y());
                     baseClearSince = -1;
-                    return remember(up, intended.position());
+                    return remember(up, baselinePosition);
                 }
             }
         } else if (travelling) {
             // Continue only through confirmed local free space; an unknown destination is not acknowledged as safe.
             Step step = steer(current, intended.position(), terrain);
-            if (step.point() != null) return remember(step.point(), intended.position());
+            if (step.point() != null) return remember(step.point(), baselinePosition);
         }
         previous = new Decision(current, true, lift > 0 || angle != 0);
         return previous;

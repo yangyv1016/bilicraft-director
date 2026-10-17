@@ -1273,6 +1273,42 @@ input::placeholder  {
     text-overflow:ellipsis;
     white-space:nowrap
 }
+.log-tools  {
+    display:flex;
+    align-items:center;
+    gap:12px;
+    padding:2px 18px 8px;
+    color:var(--muted);
+    font-size:10px
+}
+.log-filters  {
+    display:flex;
+    gap:3px;
+    flex-shrink:0
+}
+.log-filters button  {
+    border:1px solid transparent;
+    border-radius:3px;
+    background:transparent;
+    color:var(--muted);
+    font-size:10px;
+    padding:3px 7px
+}
+.log-filters button.active  {
+    border-color:#526d42;
+    background:#26351f;
+    color:var(--accent)
+}
+#observationHistoryStatus  {
+    flex:1;
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap
+}
+.log-tools>.text-button  {
+    flex-shrink:0
+}
 .command-log  {
     list-style:none;
     padding:0 18px 10px;
@@ -1310,6 +1346,9 @@ input::placeholder  {
 }
 .command-log li.pending .log-level  {
     color:#bdad7c
+}
+.command-log li.observation .log-level  {
+    color:#b4d58f
 }
 .feedback  {
     position:fixed;

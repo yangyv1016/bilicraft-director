@@ -25,6 +25,27 @@ class CameraMotionTest {
     }
 
     @Test
+    void terrainClimbAndWaitPauseTheOrbitPhaseUntilSafeMovementResumes() {
+        CameraSettings settings = settings(CameraMotion.Mode.ORBIT);
+        CameraMotion motion = new CameraMotion();
+        CameraMotion.Shot first = motion.sample(scene(), camera, settings);
+
+        motion.setTerrainPaused(true);
+        for (int tick = 0; tick < 600; tick++) {
+            assertEquals(first, motion.sample(scene(), camera, settings), "waiting must not accumulate a chasing shot");
+        }
+        motion.setTerrainPaused(false);
+        CameraMotion.Shot resumed = motion.sample(scene(), camera, settings);
+        double moved = Math.hypot(resumed.position().x() - first.position().x(),
+                resumed.position().z() - first.position().z());
+        assertTrue(moved > 0 && moved <= settings.speed / 40);
+
+        motion.setTerrainPaused(true);
+        motion.reset();
+        assertEquals(first, motion.sample(scene(), camera, settings), "a new shot must not inherit the old pause");
+    }
+
+    @Test
     void comfortablePitchKeepsTheOriginalComposition() {
         CameraMotion.Shot original = new CameraMotion.Shot(new CameraMotion.Point(136, 122, 0), center);
 

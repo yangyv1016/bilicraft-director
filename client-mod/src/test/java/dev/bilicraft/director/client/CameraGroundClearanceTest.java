@@ -8,6 +8,128 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CameraGroundClearanceTest {
     @Test
+    void loadedGroundAheadRaisesThePlannedHeightBeforeTheActualStepNeedsToStop() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), point.x() >= 5 ? 108 : 100, point.z());
+        CameraGroundClearance planner = new CameraGroundClearance();
+        CameraMotion.Point current = new CameraMotion.Point(0, 116, 0);
+        CameraMotion.Point waypoint = new CameraMotion.Point(4, 116, 0);
+
+        CameraMotion.Point planned = planner.plan("scene", current, waypoint, current.offset(20, 0, 0),
+                new CameraMotion.Point(0.1, 0, 0), 2.5, false, terrain, 1_000);
+
+        assertEquals(new CameraMotion.Point(4, 125, 0), planned);
+        CameraMotion.Point next = current.offset(0.05, 0.05, 0);
+        assertSame(next, CameraGroundClearance.constrainStep(current, next, 0.05, 0.125, terrain));
+        assertTrue(terrain.queries <= 70, "forecast reads must remain bounded local heightmap lookups");
+    }
+
+    @Test
+    void aLoadedOriginalDestinationSetsItsHeightBeforeAvoidanceCanChooseTheLowerOppositeSide() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), point.x() >= 20 ? 108 : 100, point.z());
+        CameraMotion.Point current = new CameraMotion.Point(0, 122, 0);
+        CameraMotion.Point goal = current.offset(24, 0, 0);
+
+        CameraMotion.Point planned = new CameraGroundClearance().plan("scene", current, goal, goal,
+                new CameraMotion.Point(0.1, 0, 0), 2.5, false, terrain, 1_000);
+
+        assertEquals(125, planned.y(), "a known original endpoint must not lose to a low alternate angle before forecasting");
+    }
+
+    @Test
+    void aContinuingOrbitSeesPastItsMovingWaypointSoItCanClimbBeforeReachingTheNextRoof() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), point.x() >= 5 ? 116 : 113, point.z());
+        CameraMotion.Point current = new CameraMotion.Point(0, 130, 0);
+        CameraMotion.Point movingWaypoint = current.offset(3, 0, 0);
+
+        CameraMotion.Point planned = new CameraGroundClearance().plan("scene", current, movingWaypoint, movingWaypoint,
+                new CameraMotion.Point(0.1, 0, 0), 2.5, true, terrain, 1_000);
+
+        assertEquals(133, planned.y(), "the instantaneous orbit waypoint is not the end of the continuing route");
+    }
+
+    @Test
+    void forecastAlsoCoversTheOldInertiaDirectionWhenTheRouteTurns() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), point.z() >= 3 ? 120 : 100, point.z());
+        CameraMotion.Point current = new CameraMotion.Point(0, 122, 0);
+
+        CameraMotion.Point planned = new CameraGroundClearance().plan("scene", current, current.offset(4, 0, 0),
+                current.offset(20, 0, 0), new CameraMotion.Point(0, 0, 0.1), 2.5, false, terrain, 1_000);
+
+        assertEquals(137, planned.y());
+    }
+
+    @Test
+    void leavingHighGroundHoldsItsHeightThenReturnsAtHalfABlockPerSecond() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), 120, point.z());
+        CameraGroundClearance planner = new CameraGroundClearance();
+        CameraMotion.Point current = new CameraMotion.Point(0, 137, 0);
+        CameraMotion.Point goal = new CameraMotion.Point(4, 122, 0);
+        CameraMotion.Point velocity = new CameraMotion.Point(0.1, 0, 0);
+        planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, 1_000);
+        terrain.surface = point -> new CameraMotion.Point(point.x(), 100, point.z());
+
+        for (long now = 1_050; now < 3_050; now += 50) {
+            assertEquals(137, planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, now).y());
+        }
+        assertEquals(136.975, planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, 3_050).y(), 1.0E-9);
+        assertEquals(136.95, planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, 3_100).y(), 1.0E-9);
+    }
+
+    @Test
+    void unknownForecastCannotReleaseRetainedHeightButDoesNotBlockMovementOverKnownCurrentGround() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), 120, point.z());
+        CameraGroundClearance planner = new CameraGroundClearance();
+        CameraMotion.Point current = new CameraMotion.Point(0, 137, 0);
+        CameraMotion.Point goal = new CameraMotion.Point(4, 122, 0);
+        CameraMotion.Point velocity = new CameraMotion.Point(0.1, 0, 0);
+        planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, 1_000);
+        terrain.surface = point -> point.x() >= 3 ? null : new CameraMotion.Point(point.x(), 100, point.z());
+
+        for (long now = 1_050; now <= 6_000; now += 50) {
+            assertEquals(137, planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, now).y());
+        }
+        terrain.surface = point -> null;
+        assertNull(planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, 6_050));
+    }
+
+    @Test
+    void changingSubjectsOrDisablingClearanceCannotReuseThePreviousScenesFloor() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), 120, point.z());
+        CameraGroundClearance planner = new CameraGroundClearance();
+        CameraMotion.Point current = new CameraMotion.Point(0, 137, 0);
+        CameraMotion.Point goal = new CameraMotion.Point(4, 122, 0);
+        CameraMotion.Point velocity = new CameraMotion.Point(0.1, 0, 0);
+        planner.plan("scene", current, goal, goal, velocity, 2.5, false, terrain, 1_000);
+        assertEquals(137, planner.plannedFloorY("scene"));
+        assertTrue(Double.isNaN(planner.plannedFloorY("new-scene")));
+        terrain.surface = point -> new CameraMotion.Point(point.x(), 100, point.z());
+        assertEquals(goal, planner.plan("new-scene", current, goal, goal, velocity, 2.5, false, terrain, 1_050));
+
+        terrain.clearance = 0;
+        terrain.surface = point -> { throw new AssertionError("disabled clearance must not query terrain"); };
+        assertSame(goal, planner.plan("new-scene", current, goal, goal, velocity, 2.5, false, terrain, 1_100));
+        assertTrue(Double.isNaN(planner.plannedFloorY("new-scene")));
+    }
+
+    @Test
+    void forecastStopsAtTheRouteDestinationInsteadOfClimbingForGroundBeyondTheShot() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.surface = point -> new CameraMotion.Point(point.x(), point.x() > 2 ? 200 : 100, point.z());
+        CameraMotion.Point current = new CameraMotion.Point(0, 122, 0);
+        CameraMotion.Point goal = current.offset(2, 0, 0);
+
+        assertEquals(goal, new CameraGroundClearance().plan("scene", current, goal, goal,
+                new CameraMotion.Point(0.1, 0, 0), 2.5, false, terrain, 1_000));
+    }
+
+    @Test
     void disabledClearanceReturnsTheOriginalStepWithoutReadingTerrain() {
         for (double clearance : new double[]{0, -1}) {
             ProbeTerrain terrain = new ProbeTerrain();
@@ -262,7 +384,7 @@ class CameraGroundClearanceTest {
 
         @Override
         public double maxY() {
-            throw new AssertionError("world height is checked by the controller after constraining the step");
+            return 318;
         }
     }
 }

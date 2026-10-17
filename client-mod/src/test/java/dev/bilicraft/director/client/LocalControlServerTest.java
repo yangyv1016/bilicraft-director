@@ -1,5 +1,7 @@
 package dev.bilicraft.director.client;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -15,6 +17,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -89,10 +93,146 @@ class LocalControlServerTest {
             HttpRequest oldSession = HttpRequest.newBuilder(firstAddress.resolve("/api/state"))
                     .timeout(Duration.ofSeconds(6)).header("X-BiliCraft-Token", firstAddress.getFragment()).GET().build();
             assertEquals(403, send(oldSession).statusCode());
-            HttpResponse<String> response = send(request(restarted, "/api/state").GET().build());
+            HttpResponse<String> sessionResponse = send(sessionRequest(restarted)
+                    .header("Origin", "http://127.0.0.1:" + port).GET().build());
+            assertEquals(200, sessionResponse.statusCode());
+            JsonObject session = JsonParser.parseString(sessionResponse.body()).getAsJsonObject();
+            assertEquals(Set.of("token"), session.keySet());
+            String recoveredToken = session.get("token").getAsString();
+            assertNotEquals(firstAddress.getFragment(), recoveredToken);
+            assertEquals(restarted.address().getFragment(), recoveredToken);
+            HttpResponse<String> response = send(HttpRequest.newBuilder(firstAddress.resolve("/api/state"))
+                    .timeout(Duration.ofSeconds(6)).header("X-BiliCraft-Token", recoveredToken).GET().build());
             assertEquals(200, response.statusCode());
             assertEquals("{\"run\":2}", response.body());
             assertSecurityHeaders(response);
+        }
+    }
+
+    @Test
+    void sameOriginBootstrapReturnsOnlyTheCurrentTokenWithoutCallingTheGame() throws Exception {
+        AtomicInteger stateCalls = new AtomicInteger();
+        AtomicInteger commandCalls = new AtomicInteger();
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
+            stateCalls.incrementAndGet();
+            return CompletableFuture.completedFuture("{\"ready\":true}");
+        }, body -> {
+            commandCalls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        })) {
+            HttpResponse<String> response = send(sessionRequest(server).GET().build());
+
+            assertEquals(200, response.statusCode());
+            assertEquals("application/json; charset=utf-8", response.headers().firstValue("Content-Type").orElseThrow());
+            JsonObject session = JsonParser.parseString(response.body()).getAsJsonObject();
+            assertEquals(Set.of("token"), session.keySet());
+            String recoveredToken = session.get("token").getAsString();
+            assertEquals(server.address().getFragment(), recoveredToken);
+            assertSecurityHeaders(response);
+            assertEquals(0, stateCalls.get());
+            assertEquals(0, commandCalls.get());
+            HttpResponse<String> state = send(HttpRequest.newBuilder(server.address().resolve("/api/state"))
+                    .timeout(Duration.ofSeconds(6)).header("X-BiliCraft-Token", recoveredToken).GET().build());
+            assertEquals(200, state.statusCode());
+            assertEquals("{\"ready\":true}", state.body());
+            assertEquals(1, stateCalls.get());
+            assertEquals(0, commandCalls.get());
+        }
+    }
+
+    @Test
+    void bootstrapRejectsForeignOrDuplicateOriginsAndHostAliasesWithoutReturningTheToken() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        }, body -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        })) {
+            String origin = "http://127.0.0.1:" + server.address().getPort();
+            for (String foreign : List.of("https://example.invalid", "null", origin + "/", origin + "0")) {
+                HttpResponse<String> response = send(sessionRequest(server).header("Origin", foreign).GET().build());
+                assertEquals(403, response.statusCode());
+                assertFalse(response.body().contains(server.address().getFragment()));
+                assertSecurityHeaders(response);
+            }
+            HttpResponse<String> duplicate = send(sessionRequest(server)
+                    .header("Origin", origin).header("Origin", origin).GET().build());
+            assertEquals(403, duplicate.statusCode());
+            assertFalse(duplicate.body().contains(server.address().getFragment()));
+            URI alias = URI.create("http://localhost:" + server.address().getPort() + "/api/session");
+            HttpResponse<String> wrongHost = send(sessionRequest(server).uri(alias).GET().build());
+            assertEquals(403, wrongHost.statusCode());
+            assertFalse(wrongHost.body().contains(server.address().getFragment()));
+            assertEquals(0, calls.get());
+        }
+    }
+
+    @Test
+    void bootstrapRequiresExactlyOneMatchingFetchSiteModeAndControlHeader() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        }, body -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        })) {
+            Map<String, String> metadata = Map.of("Sec-Fetch-Site", "same-origin",
+                    "Sec-Fetch-Mode", "same-origin", "X-BiliCraft-Client", "control");
+            for (var entry : metadata.entrySet()) {
+                HttpRequest.Builder missing = HttpRequest.newBuilder(server.address().resolve("/api/session"))
+                        .timeout(Duration.ofSeconds(6));
+                metadata.forEach((name, value) -> { if (!name.equals(entry.getKey())) missing.header(name, value); });
+                for (HttpRequest request : List.of(missing.GET().build(),
+                        sessionRequest(server).header(entry.getKey(), entry.getValue()).GET().build(),
+                        sessionRequest(server).setHeader(entry.getKey(), entry.getValue() + ", " + entry.getValue()).GET().build())) {
+                    HttpResponse<String> response = send(request);
+                    assertEquals(403, response.statusCode(), entry.getKey());
+                    assertFalse(response.body().contains(server.address().getFragment()));
+                    assertSecurityHeaders(response);
+                }
+            }
+            Map<String, List<String>> invalid = Map.of("Sec-Fetch-Site", List.of("cross-site", "same-site", "none"),
+                    "Sec-Fetch-Mode", List.of("cors", "no-cors", "navigate"),
+                    "X-BiliCraft-Client", List.of("Control", "other", ""));
+            for (var entry : invalid.entrySet()) {
+                for (String value : entry.getValue()) {
+                    HttpResponse<String> response = send(sessionRequest(server).setHeader(entry.getKey(), value).GET().build());
+                    assertEquals(403, response.statusCode(), entry.getKey());
+                    assertFalse(response.body().contains(server.address().getFragment()));
+                    assertSecurityHeaders(response);
+                }
+            }
+            assertEquals(0, calls.get());
+        }
+    }
+
+    @Test
+    void bootstrapOnlyAcceptsGetWithoutAQueryAndDoesNotAllowPreflight() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        try (LocalControlServer server = new LocalControlServer(0, () -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        }, body -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture("{}");
+        })) {
+            for (String method : List.of("POST", "OPTIONS")) {
+                HttpResponse<String> response = send(sessionRequest(server)
+                        .method(method, HttpRequest.BodyPublishers.noBody()).build());
+                assertEquals(405, response.statusCode());
+                assertEquals("GET", response.headers().firstValue("Allow").orElseThrow());
+                assertFalse(response.body().contains(server.address().getFragment()));
+                assertSecurityHeaders(response);
+            }
+            HttpResponse<String> query = send(sessionRequest(server)
+                    .uri(server.address().resolve("/api/session?token=" + server.address().getFragment())).GET().build());
+            assertEquals(404, query.statusCode());
+            assertFalse(query.body().contains(server.address().getFragment()));
+            assertSecurityHeaders(query);
+            assertEquals(0, calls.get());
         }
     }
 
@@ -369,6 +509,12 @@ class LocalControlServerTest {
     private HttpRequest.Builder request(LocalControlServer server, String path) {
         return HttpRequest.newBuilder(server.address().resolve(path)).timeout(Duration.ofSeconds(6))
                 .header("X-BiliCraft-Token", server.address().getFragment());
+    }
+
+    private HttpRequest.Builder sessionRequest(LocalControlServer server) {
+        return HttpRequest.newBuilder(server.address().resolve("/api/session")).timeout(Duration.ofSeconds(6))
+                .header("Sec-Fetch-Site", "same-origin").header("Sec-Fetch-Mode", "same-origin")
+                .header("X-BiliCraft-Client", "control");
     }
 
     private static List<ServerSocket> reserveAdjacentPorts() throws IOException {

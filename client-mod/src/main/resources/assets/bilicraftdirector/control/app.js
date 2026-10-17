@@ -23,18 +23,20 @@ const commandNames = {
     queueAdd: "加入待播队列", queueRemove: "移除待播项", queueMove: "调整待播顺序", queueSettings: "保存队列配置",
     queueAdjust: "调整排播时长", chatSend: "发送聊天", webSettings: "保存本地中控端口"
 };
-const tokenStorageKey = "bilicraft-control-token";
-let sessionToken = location.hash.slice(1);
+const sessionTokenPattern = /^[a-f0-9]{64}$/i;
+const sessionChangedMessage = "客户端会话已更新，正在自动重新连接；本次操作不会自动重试";
+let sessionToken = sessionTokenPattern.test(location.hash.slice(1)) ? location.hash.slice(1) : "";
 try {
-    if (sessionToken) sessionStorage.setItem(tokenStorageKey, sessionToken);
-    else sessionToken = sessionStorage.getItem(tokenStorageKey) || "";
+    sessionStorage.removeItem("bilicraft-control-token");
 } catch {
-    // The current page can still pair when browser storage is unavailable.
+    // Pairing is kept in memory and does not require browser storage.
 }
 if (location.hash) history.replaceState(null, "", location.pathname);
 
 let state = null;
 let apiOnline = false;
+let connectionRevision = 0;
+let sessionPromise = null;
 let pollPromise = null;
 let pendingCommands = 0;
 let stopPending = false;
@@ -47,6 +49,7 @@ let liveCameraDirty = false;
 let liveCameraSending = false;
 let liveCameraRevision = 0;
 let liveCameraTimer;
+let liveCameraQueued = false;
 let liveCameraPersist = false;
 let liveCameraRequest = null;
 let cameraSavePending = false;
@@ -61,6 +64,11 @@ let aiEnabledDirty = false;
 const aiDrafts = new Map();
 let feedbackTimer;
 const logs = [];
+const observationStageNames = { REQUEST: "申请观察", NOTICE: "私密预告", APPROACHING: "入镜准备", FOLLOWING: "开始跟随", ENDED: "观察结束", DURATION: "时长调整" };
+const observationLastIds = new Map();
+let observationHistoryId = "";
+let observationEntries = [];
+let logFilter = "all";
 
 const canvas = element("mapCanvas");
 const context = canvas.getContext("2d");
@@ -77,26 +85,73 @@ let chatSignature = "";
 let previousChatIds = new Set();
 let chatUnread = 0;
 
-function addLog(message, level = "info") {
-    const entry = { message, level, time: new Date().toLocaleTimeString("zh-CN", { hour12: false }) };
-    logs.unshift(entry);
-    if (logs.length > 100) logs.pop();
+function addLog(message, level = "info", observation = null) {
+    const date = observation ? new Date(observation.timestamp) : new Date();
+    const entry = { message, level, observation, timestamp: date.getTime(), time: date.toLocaleTimeString("zh-CN", { hour12: false }) };
+    const olderIndex = logs.findIndex((existing) => existing.timestamp < entry.timestamp);
+    const index = olderIndex < 0 ? logs.length : olderIndex;
+    logs.splice(index, 0, entry);
+    if (logs.length > 300) logs.pop();
     const row = document.createElement("li");
     if (level !== "info") row.className = level;
+    row.dataset.category = observation ? "observation" : "operation";
+    row.title = date.toLocaleString("zh-CN", { hour12: false });
     const time = document.createElement("span");
     time.className = "log-time";
     time.textContent = entry.time;
     const label = document.createElement("span");
     label.className = "log-level";
-    label.textContent = level === "error" ? "失败" : level === "pending" ? "提交" : "记录";
+    label.textContent = observation ? "观察" : level === "error" ? "失败" : level === "pending" ? "提交" : "记录";
     const text = document.createElement("span");
     text.className = "log-message";
     text.textContent = message;
     row.append(time, label, text);
-    element("commandLog").prepend(row);
-    while (element("commandLog").children.length > 100) element("commandLog").lastElementChild.remove();
-    element("logCount").textContent = String(logs.length);
-    element("logLatest").textContent = message;
+    element("commandLog").insertBefore(row, element("commandLog").children[index] || null);
+    while (element("commandLog").children.length > 300) element("commandLog").lastElementChild.remove();
+    renderLogFilter();
+    element("logLatest").textContent = logs[0].message;
+}
+
+function renderLogFilter() {
+    let visible = 0;
+    for (const row of element("commandLog").children) {
+        row.hidden = logFilter === "observation" && row.dataset.category !== "observation";
+        if (!row.hidden) visible++;
+    }
+    element("logCount").textContent = String(visible);
+    document.querySelectorAll("[data-log-filter]").forEach((button) => {
+        const active = button.dataset.logFilter === logFilter;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+    });
+}
+
+function syncObservationEvents(history) {
+    if (!history) return;
+    const knownHistory = observationLastIds.has(history.historyId);
+    const lastId = observationLastIds.get(history.historyId) || 0;
+    observationHistoryId = history.historyId;
+    // Export only the event contract; never copy the complete state or protocol session.
+    observationEntries = history.entries.map((entry) => ({ id: entry.id, timestamp: entry.timestamp,
+        stage: entry.stage, source: entry.source, playerId: entry.playerId, playerName: entry.playerName,
+        server: entry.server, world: entry.world, reason: entry.reason }));
+    let latestId = lastId;
+    let ended = null;
+    for (const entry of observationEntries) {
+        if (entry.id <= lastId) continue;
+        const source = entry.source === "SERVER" ? "服务端" : "本地";
+        const message = entry.playerName + " · " + observationStageNames[entry.stage] + " · " + source
+            + " · " + entry.reason + " · " + entry.server + " / " + entry.world;
+        addLog(message, "observation", entry);
+        latestId = Math.max(latestId, entry.id);
+        if (entry.stage === "ENDED") ended = message;
+    }
+    observationLastIds.set(history.historyId, latestId);
+    element("exportObservationEvents").disabled = observationEntries.length === 0;
+    element("observationHistoryStatus").textContent = "客户端内存保留最近 " + observationEntries.length
+        + " / 200 条观察事件；清空仅清除当前显示，刷新可恢复。重启前的历史见游戏日志 [ObservationEvent]。";
+    element("observationHistoryStatus").title = element("observationHistoryStatus").textContent;
+    if (knownHistory && ended) showFeedback(ended);
 }
 
 function showFeedback(message, error = false) {
@@ -165,7 +220,8 @@ function updateAvailability() {
     for (const id of ["mapLocalBaseUrl", "mapLocalWorld", "resetMapSettings", "clearMapSettings"]) {
         element(id).disabled = !canConfigureMap || busy;
     }
-    element("saveMapSettings").disabled = !canConfigureMap || busy || !mapDraft?.dirty || state.map.loading;
+    element("saveMapSettings").disabled = !canConfigureMap || busy || !mapDraft?.dirty || state.map.loading
+        || mapDraft.server !== state.server || mapDraft.world !== state.world;
     const aiDraft = aiDrafts.get(currentProvider);
     element("saveAi").disabled = !available || busy || !aiDraft
         || (!aiDraft.dirty && !aiEnabledDirty && currentProvider === state.ai.provider);
@@ -187,30 +243,66 @@ function updateAvailability() {
     element("chatSend").disabled = !canChat || busy || chatSending || !element("chatInput").value.trim();
     element("chatSend").textContent = chatSending ? "发送中…" : "发送";
     element("chatLength").textContent = element("chatInput").value.length + " / " + element("chatInput").maxLength;
-    element("chatStatus").textContent = !apiOnline ? "本机中控离线 · 草稿已保留"
+    element("chatStatus").textContent = !apiOnline ? "等待客户端 · 聊天草稿已保留"
         : canChat ? "已连接游戏 · 使用当前登录账号发送" : "游戏未连接 · 连接后可发送";
 }
 
 function setConnection(online, message) {
+    if (!online && apiOnline) connectionRevision++;
     if (apiOnline !== online) addLog(online ? "已连接本机导播中控" : message, online ? "info" : "error");
     apiOnline = online;
     element("connectionBadge").classList.toggle("online", online);
     element("connectionBadge").classList.toggle("offline", !online);
-    element("connectionText").textContent = online ? "本机已连接" : "本机离线";
+    element("connectionText").textContent = online ? "本机已连接" : "等待客户端";
     if (!online) {
+        clearTimeout(liveCameraTimer);
+        liveCameraQueued = false;
+        liveCameraPersist = false;
+        if (liveCameraDirty) element("liveCameraStatus").textContent = "等待客户端 · 调整草稿已保留，请重新应用";
         element("serverText").textContent = message;
         element("serverText").title = message;
-        element("lastUpdate").textContent = "同步中断";
-        element("settingsConnection").textContent = "本机离线 · 未确认新状态";
+        element("lastUpdate").textContent = "等待自动重连";
+        element("settingsConnection").textContent = "等待客户端 · 草稿已保留，恢复后自动同步";
     }
     updateAvailability();
 }
 
+function ensureSession() {
+    if (sessionToken) return Promise.resolve(sessionToken);
+    if (sessionPromise) return sessionPromise;
+    sessionPromise = (async () => {
+        const abort = new AbortController();
+        const timeout = setTimeout(() => abort.abort(), 6000);
+        try {
+            const response = await fetch("/api/session", {
+                mode: "same-origin", headers: { "X-BiliCraft-Client": "control" },
+                signal: abort.signal, cache: "no-store", credentials: "omit"
+            });
+            if (!response.ok) throw new Error("本机会话请求失败（HTTP " + response.status + "），正在等待自动重连");
+            let paired;
+            try { paired = await response.json(); }
+            catch { throw new Error("本机会话响应格式不匹配"); }
+            if (!paired || typeof paired.token !== "string" || !sessionTokenPattern.test(paired.token)) {
+                throw new Error("本机会话响应格式不匹配");
+            }
+            sessionToken = paired.token;
+            return sessionToken;
+        } finally {
+            clearTimeout(timeout);
+            sessionPromise = null;
+        }
+    })();
+    return sessionPromise;
+}
+
 async function requestApi(path, command) {
+    const commandSession = sessionToken;
+    const requestToken = await ensureSession();
+    if (command && requestToken !== commandSession) throw new Error(sessionChangedMessage);
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), 6000);
     try {
-        const headers = { "X-BiliCraft-Token": sessionToken };
+        const headers = { "X-BiliCraft-Token": requestToken };
         const options = { headers, signal: abort.signal, cache: "no-store", credentials: "omit" };
         if (command) {
             headers["Content-Type"] = "application/json";
@@ -219,12 +311,14 @@ async function requestApi(path, command) {
         }
         const response = await fetch(path, options);
         if (response.status === 401 || response.status === 403) {
-            sessionToken = "";
-            try { sessionStorage.removeItem(tokenStorageKey); } catch { /* See the storage boundary above. */ }
-            throw new Error("配对已失效，请从 Mod 菜单重新打开本地中控");
+            // A late response from the previous client must not discard a newer session.
+            if (sessionToken === requestToken) sessionToken = "";
+            throw new Error(sessionChangedMessage);
         }
         if (!response.ok) throw new Error("本机接口响应异常（HTTP " + response.status + "）");
-        return await response.json();
+        const data = await response.json();
+        if (sessionToken !== requestToken) throw new Error(sessionChangedMessage);
+        return { data, token: requestToken };
     } finally {
         clearTimeout(timeout);
     }
@@ -232,13 +326,10 @@ async function requestApi(path, command) {
 
 function refreshState() {
     if (pollPromise) return pollPromise;
-    if (!sessionToken) {
-        setConnection(false, "请从 Mod 菜单打开中控以完成配对");
-        return Promise.resolve(false);
-    }
     pollPromise = (async () => {
         try {
-            const next = await requestApi("/api/state");
+            const { data: next, token } = await requestApi("/api/state");
+            if (token !== sessionToken) throw new Error(sessionChangedMessage);
             if (!next || !Array.isArray(next.targets) || !next.settings || !next.ai || !next.ai.profiles
                 || !next.queue || !Array.isArray(next.queue.pending) || !next.queue.settings
                 || !next.chat || !Array.isArray(next.chat.messages)) {
@@ -248,7 +339,8 @@ function refreshState() {
             setConnection(true, "");
             return true;
         } catch (error) {
-            setConnection(false, error.name === "AbortError" ? "本机接口响应超时" : error.message);
+            setConnection(false, error.name === "AbortError" ? "客户端暂未响应，正在等待自动重连"
+                : error instanceof TypeError ? "等待客户端启动或重连，页面会自动恢复" : error.message);
             return false;
         } finally {
             pollPromise = null;
@@ -265,7 +357,8 @@ async function sendCommand(command, quiet = false) {
     const label = commandNames[command.action];
     if (!quiet) addLog(label + "：正在提交", "pending");
     try {
-        const result = await requestApi("/api/command", command);
+        const { data: result, token } = await requestApi("/api/command", command);
+        if (token !== sessionToken) throw new Error(sessionChangedMessage);
         if (typeof result.ok !== "boolean" || typeof result.message !== "string") {
             throw new Error("本机命令响应格式不匹配");
         }
@@ -280,7 +373,9 @@ async function sendCommand(command, quiet = false) {
         }
         // An older poll may have started before the command. Wait for it, then read the applied state.
         if (pollPromise) await pollPromise;
+        if (token !== sessionToken) throw new Error(sessionChangedMessage);
         const synchronized = await refreshState();
+        if (token !== sessionToken) throw new Error(sessionChangedMessage);
         if (!synchronized) {
             addLog(label + "：客户端已接受操作，但新状态尚未确认", "error");
             showFeedback("客户端已接受操作，但新状态尚未确认；请等待重新连接", true);
@@ -308,8 +403,10 @@ function applyState(next) {
         selectedTarget = null;
         mapView.initialized = false;
         mapView.followCamera = true;
-        if (mapDraft?.dirty) addLog("服务器或世界已切换，旧世界的地图草稿已清理");
-        mapDraft = null;
+        if (!mapDraft?.dirty) mapDraft = null;
+        else if (next.connected && (mapDraft.server !== next.server || mapDraft.world !== next.world)) {
+            addLog("地图草稿已保留；切回原服务器与世界，或放弃草稿后再保存");
+        }
     }
     if (!selectedId && next.selectedTargetId) selectedId = next.selectedTargetId;
     if (next.selectedTargetId && next.selectedTargetId !== previousSelection) {
@@ -326,6 +423,7 @@ function applyState(next) {
         + " · 已同步 " + element("lastUpdate").textContent;
     renderAccount();
     renderChat();
+    syncObservationEvents(next.observationEvents);
     element("mapWorldLabel").textContent = next.world || "未进入世界";
     const terrainBlocked = next.terrain?.recoveryBlocked;
     const manualOnly = !next.patrol.pending && !next.patrol.automatic;
@@ -800,6 +898,7 @@ function renderLiveCameraValues() {
 
 function scheduleLiveCamera(persist, immediate) {
     clearTimeout(liveCameraTimer);
+    liveCameraQueued = true;
     liveCameraPersist ||= persist;
     liveCameraDirty = true;
     liveCameraRevision++;
@@ -809,7 +908,10 @@ function scheduleLiveCamera(persist, immediate) {
 
 async function flushLiveCamera() {
     if (liveCameraSending || cameraSavePending || !liveCameraDirty || !apiOnline) return;
+    liveCameraQueued = false;
     const revision = liveCameraRevision;
+    const requestSession = sessionToken;
+    const requestConnectionRevision = connectionRevision;
     const command = { action: "camera", mode: element("liveCameraMode").value, autoDistance: element("liveAutoDistance").checked, persist: liveCameraPersist };
     for (const setting of cameraNumberSettings) command[setting] = Number(element("live" + liveCameraIds[setting]).value);
     liveCameraPersist = false;
@@ -818,14 +920,16 @@ async function flushLiveCamera() {
     const result = await liveCameraRequest;
     liveCameraRequest = null;
     liveCameraSending = false;
-    if (result.ok && result.synchronized && revision === liveCameraRevision) {
+    const synchronized = result.ok && result.synchronized && sessionToken === requestSession
+        && connectionRevision === requestConnectionRevision;
+    if (synchronized && revision === liveCameraRevision) {
         liveCameraDirty = false;
         element("liveCameraStatus").textContent = command.persist ? "已应用 · 已保存" : "已实时应用 · 未保存";
-    } else if (!result.ok || !result.synchronized) {
+    } else if (!synchronized) {
         element("liveCameraStatus").textContent = "调整尚未确认，请检查连接后重试";
     }
     updateAvailability();
-    if (revision !== liveCameraRevision && apiOnline) liveCameraTimer = setTimeout(flushLiveCamera, 0);
+    if (liveCameraQueued && revision !== liveCameraRevision && apiOnline) liveCameraTimer = setTimeout(flushLiveCamera, 0);
 }
 
 function renderAiForm() {
@@ -899,8 +1003,11 @@ function renderMapStatus() {
     element("mapSceneCount").textContent = map.sceneCount + " 项（本机当前世界缓存）";
     element("mapFetchedAt").textContent = map.fetchedAt > 0 ? new Date(map.fetchedAt).toLocaleString("zh-CN", { hour12: false }) : "尚未导入";
     element("mapImportDetail").textContent = map.detail || "保存本机地图来源后，手动拉取标记和区域。";
-    element("mapDraftStatus").textContent = mapDraft?.dirty ? "存在未保存草稿" : map.localConfigured ? "本机来源已保存" : "本机来源未配置";
-    element("mapSettingsScope").textContent = state.connected ? "仅用于 " + state.server + " · " + state.world
+    const draftOtherWorld = mapDraft?.dirty && (mapDraft.server !== state.server || mapDraft.world !== state.world);
+    element("mapDraftStatus").textContent = draftOtherWorld ? "已保留原世界草稿" : mapDraft?.dirty ? "存在未保存草稿" : map.localConfigured ? "本机来源已保存" : "本机来源未配置";
+    element("mapSettingsScope").textContent = draftOtherWorld
+        ? "草稿属于 " + mapDraft.server + " · " + mapDraft.world + "；切回对应世界或放弃草稿后再保存。"
+        : state.connected ? "仅用于 " + state.server + " · " + state.world
         : "进入世界后可配置此服务器与世界的地图来源。";
     element("mapRulesStatus").textContent = status + "；本机来源优先、按服务器与世界隔离，仅手动直连外链导入。玩家跟随须由导播服务授权。";
     element("dynmapLink").hidden = !map.configured;
@@ -922,9 +1029,8 @@ for (const id of ["mapLocalBaseUrl", "mapLocalWorld"]) {
 }
 element("resetMapSettings").addEventListener("click", () => {
     if (!state || !mapDraft) return;
-    mapDraft.baseUrl = state.map.localBaseUrl;
-    mapDraft.dynmapWorld = state.map.localDynmapWorld;
-    mapDraft.dirty = false;
+    mapDraft = { server: state.server, world: state.world, baseUrl: state.map.localBaseUrl,
+        dynmapWorld: state.map.localDynmapWorld, dirty: false };
     element("mapLocalBaseUrl").value = mapDraft.baseUrl;
     element("mapLocalWorld").value = mapDraft.dynmapWorld;
     renderMapStatus();
@@ -1070,16 +1176,25 @@ element("resetCamera").addEventListener("click", () => {
 element("cameraForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (element("saveCamera").disabled || !element("cameraForm").reportValidity()) return;
+    const saveSession = sessionToken;
+    const saveConnectionRevision = connectionRevision;
     const command = { action: "camera", mode: element("cameraMode").value, autoDistance: element("autoDistance").checked };
     for (const setting of cameraNumberSettings) command[setting] = Number(element(setting + "Number").value);
     // A newer explicit save supersedes queued previews, and waits for an already-sent preview to drain.
     clearTimeout(liveCameraTimer);
+    liveCameraQueued = false;
     liveCameraDirty = false;
     liveCameraPersist = false;
     liveCameraRevision++;
     cameraSavePending = true;
     updateAvailability();
     if (liveCameraRequest) await liveCameraRequest;
+    if (!apiOnline || sessionToken !== saveSession || connectionRevision !== saveConnectionRevision) {
+        cameraSavePending = false;
+        element("cameraDraftStatus").textContent = "连接已变化，保存已取消；草稿已保留，请重新应用";
+        updateAvailability();
+        return;
+    }
     const result = await sendCommand(command);
     cameraSavePending = false;
     if (result.ok && result.synchronized) {
@@ -1275,6 +1390,7 @@ function setConsoleView(view) {
     document.body.classList.toggle("chat-expanded", chatOpen);
     element("chatPanel").hidden = !chatOpen;
     element("commandLog").hidden = !logOpen;
+    element("logTools").hidden = !logOpen;
     element("logLatest").hidden = chatOpen;
     element("clearLogs").hidden = chatOpen;
     element("logToggle").setAttribute("aria-expanded", String(logOpen));
@@ -1309,7 +1425,27 @@ element("clearLogs").addEventListener("click", () => {
     logs.length = 0;
     element("commandLog").replaceChildren();
     element("logCount").textContent = "0";
-    element("logLatest").textContent = "本地会话记录已清空";
+    element("logLatest").textContent = "当前显示已清空；观察事件仍保留于客户端内存，可导出或刷新恢复";
+});
+document.querySelectorAll("[data-log-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+        logFilter = button.dataset.logFilter;
+        renderLogFilter();
+    });
+});
+element("exportObservationEvents").addEventListener("click", () => {
+    if (!observationEntries.length) return;
+    const exportedAt = new Date().toISOString();
+    const data = { formatVersion: 1, exportedAt, historyId: observationHistoryId,
+        note: "仅含客户端当前内存保留的最近200条观察事件；不包含完整中控状态、观察会话、坐标或凭据。",
+        events: observationEntries.map((entry) => ({ ...entry, time: new Date(entry.timestamp).toLocaleString("zh-CN", { hour12: false }) })) };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "bilicraft-observation-" + exportedAt.replace(/[:.]/g, "-") + ".json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    showFeedback("已导出 " + observationEntries.length + " 条观察记录");
 });
 
 function scheduleMap() {

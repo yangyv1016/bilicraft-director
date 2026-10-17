@@ -77,6 +77,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     final CameraSettings settings = new CameraSettings();
     private boolean cameraSettingsSaved = true;
     private final CameraMotion cameraMotion = new CameraMotion();
+    private final CameraGroundClearance groundClearance = new CameraGroundClearance();
     private final CameraTerrainAvoidance terrainAvoidance = new CameraTerrainAvoidance();
     private CameraTerrainAvoidance.Decision terrainDecision;
     private int terrainLandingAttempts;
@@ -110,6 +111,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private int localControlStartPort;
     private final AccountAvatar accountAvatar = new AccountAvatar();
     private final LocalChatHistory localChat = new LocalChatHistory();
+    private final LocalObservationEvents observationEvents = new LocalObservationEvents();
     private final DynmapMapClient mapClient = new DynmapMapClient();
     private final LocalMapSettings localMapSettings = new LocalMapSettings(FabricLoader.getInstance().getConfigDir()
             .resolve("bilicraft-director-maps"));
@@ -148,6 +150,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     private long lastHeartbeat;
     private String currentWorldKey;
     private UUID requestedTarget;
+    private String requestedTargetName;
     private UUID observationSessionId;
     private PlayerView authorizedPlayerPose;
     private PlayerArrival playerArrival;
@@ -286,6 +289,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (!overlay) localChat.append(message.getString(), System.currentTimeMillis());
         });
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            if (requestedTarget != null) {
+                recordObservationEvent(requestedTarget, requestedTargetName, "ENDED", "CLIENT", "游戏连接已更新，旧观察会话结束");
+            }
             snapshotConnectionGeneration++;
             connectionSession.joined();
             localChat.clear();
@@ -300,6 +306,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             snapshotWorldKey = null;
             observeRequestTarget = null;
             requestedTarget = null;
+            requestedTargetName = null;
             observationSessionId = null;
             authorizedPlayerPose = null;
             playerArrival = null;
@@ -341,7 +348,18 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         // Minecraft clears its task queue during disconnect; client.execute can lose this notification.
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> disconnectedHandlers.add(handler));
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
+        ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
+            try {
+                startLocalControl();
+            } catch (IOException exception) {
+                LOGGER.warn("Cannot automatically start local control server", exception);
+                status = "本地中控自动监听失败；可从导播菜单重试或修改首选端口";
+            }
+        });
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+            if (requestedTarget != null) {
+                recordObservationEvent(requestedTarget, requestedTargetName, "ENDED", "CLIENT", "客户端正在退出");
+            }
             invalidateAiDecision();
             aiHttpClient.close();
             accountAvatar.close();
@@ -372,6 +390,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         for (ClientPlayNetworkHandler handler; (handler = disconnectedHandlers.poll()) != null;) {
             if (client.getNetworkHandler() != null && client.getNetworkHandler() != handler) continue;
             connectionSession.disconnected(running, System.currentTimeMillis());
+            if (requestedTarget != null) {
+                recordObservationEvent(requestedTarget, requestedTargetName, "ENDED", "CLIENT", "游戏连接中断，当前观察授权结束");
+            }
             snapshotConnectionGeneration++;
             if (connectionSession.reconnectPending()) LOGGER.info("Director reconnect armed; waiting for disconnection screen");
             shotTransition.clear();
@@ -382,6 +403,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             running = false;
             allowed = false;
             requestedTarget = null;
+            requestedTargetName = null;
             observationSessionId = null;
             authorizedPlayerPose = null;
             playerArrival = null;
@@ -660,7 +682,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             if (observationSessionId == null && update.state() != ObserveState.NOTICE) return;
             if (observationSessionId != null && !observationSessionId.equals(update.sessionId())) return;
             if (update.state() == ObserveState.ENDED) {
-                endObservation(update.reason());
+                endObservation(update.reason(), "SERVER");
             } else if (running && allowed) {
                 if (update.state() == ObserveState.NOTICE) {
                     if (observationSessionId != null) return;
@@ -679,6 +701,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     authorizedPlayerPose = pose;
                     cameraMotion.reset();
                     terrainAvoidance.reset();
+                    groundClearance.reset();
                     CameraMotion.Shot shot = cameraMotion.sample(new CameraMotion.Subject("player:" + pose.id(),
                             new CameraMotion.Point(pose.x(), pose.y() + 1.2, pose.z()), pose.yaw(), true, false, false, settings.radius),
                             new CameraMotion.Point(client.player.getX(), client.player.getY(), client.player.getZ()), settings);
@@ -690,6 +713,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     playerArrival = null;
                     cameraMotion.reset();
                     terrainAvoidance.reset();
+                    groundClearance.reset();
                 }
                 observeState = update.state();
                 observeDeadline = update.deadlineEpochMillis();
@@ -698,6 +722,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 status = update.state() == ObserveState.NOTICE ? "已通知玩家，等待 15 秒"
                         : update.state() == ObserveState.APPROACHING ? "预告通过，正在遮罩下准备玩家入镜" : "已获服务端观察许可";
+                recordObservationEvent(requestedTarget, requestedTargetName, update.state().name(), "SERVER", update.reason());
                 stopMotion();
                 if (update.state() == ObserveState.FOLLOWING) {
                     shotTransition.begin(System.currentTimeMillis());
@@ -718,7 +743,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 return;
             }
             if (reply.state() == ObserveState.ENDED) {
-                endObservation(reply.reason());
+                endObservation(reply.reason(), "SERVER");
                 return;
             }
             showcaseQueue.applyPlayerDuration(entryId, reply.durationSeconds());
@@ -728,6 +753,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             }
             status = reply.accepted() ? "玩家跟随总时长已获核准：" + reply.durationSeconds() + "秒"
                     : "时长调整未获核准，保留当前跟随：" + reply.reason();
+            recordObservationEvent(requestedTarget, requestedTargetName, "DURATION", "SERVER",
+                    status + (reply.accepted() && !reply.reason().isEmpty() ? "；" + reply.reason() : ""));
         } else if (message instanceof Message.Error error) {
             if (snapshotPending) {
                 lastSnapshotResponse = System.currentTimeMillis();
@@ -742,7 +769,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                 }
                 if (rejected.equals(requestedTarget)) {
                     send(new Message.Stop());
-                    endObservation(error.reason());
+                    endObservation(error.reason(), "SERVER");
                 }
                 status = "玩家观察请求失败：" + error.reason();
             } else if (durationRequestTarget != null) {
@@ -780,6 +807,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
 
     private void clearMapState() {
         terrainAvoidance.reset();
+        groundClearance.reset();
         terrainDecision = null;
         terrainLandingSearch = null;
         lastSafeCameraPosition = null;
@@ -1436,6 +1464,9 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         if (worldKey.equals(currentWorldKey)) {
             return;
         }
+        if (requestedTarget != null) {
+            recordObservationEvent(requestedTarget, requestedTargetName, "ENDED", "CLIENT", "摄影机切换世界，当前观察授权结束");
+        }
         clearMapState();
         if (requestedTarget != null || (observeRequestTarget != null && !businessRequestCancelled)) {
             send(new Message.Stop());
@@ -1455,6 +1486,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         lastMessage = 0;
         lastHeartbeat = 0;
         requestedTarget = null;
+        requestedTargetName = null;
         observationSessionId = null;
         authorizedPlayerPose = null;
         playerArrival = null;
@@ -1499,7 +1531,11 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     public void stop(String reason) {
+        if (requestedTarget != null) {
+            recordObservationEvent(requestedTarget, requestedTargetName, "ENDED", "CLIENT", reason);
+        }
         terrainAvoidance.reset();
+        groundClearance.reset();
         terrainDecision = null;
         terrainLandingSearch = null;
         terrainReturning = false;
@@ -1517,6 +1553,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         running = false;
         connectionSession.cancelReconnect();
         requestedTarget = null;
+        requestedTargetName = null;
         observationSessionId = null;
         authorizedPlayerPose = null;
         playerArrival = null;
@@ -1663,13 +1700,17 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             endObservation("切换展示目标");
         }
         terrainAvoidance.reset();
+        groundClearance.reset();
         terrainDecision = null;
         terrainLandingAttempts = 0;
         terrainLandingSearch = null;
         terrainReturning = false;
         terrainRecovery.reset();
         if (target instanceof ShowcaseTarget.Player player) {
+            recordObservationEvent(player.view().id(), player.name(), "REQUEST", "CLIENT",
+                    "申请玩家观察" + (durationSeconds == 0 ? "，时长由服务端选择" : "，计划跟随 " + durationSeconds + " 秒"));
             if (!send(new Message.ObserveRequest(player.view().id(), durationSeconds))) {
+                recordObservationEvent(player.view().id(), player.name(), "ENDED", "CLIENT", "玩家观察请求发送失败");
                 revokeServerAccess("玩家观察请求发送失败");
                 return false;
             }
@@ -1677,6 +1718,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             sceneArrival = null;
             shotTransition.clear();
             requestedTarget = player.view().id();
+            requestedTargetName = player.name();
             observationSessionId = null;
             authorizedPlayerPose = null;
             playerArrival = null;
@@ -1749,7 +1791,14 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void endObservation(String reason) {
+        endObservation(reason, "CLIENT");
+    }
+
+    private void endObservation(String reason, String source) {
         MinecraftClient client = MinecraftClient.getInstance();
+        if (requestedTarget != null) {
+            recordObservationEvent(requestedTarget, requestedTargetName, "ENDED", source, reason);
+        }
         boolean wasFollowing = observeState == ObserveState.FOLLOWING;
         PlayerEntity target = client.world == null || requestedTarget == null
                 ? null : client.world.getPlayerByUuid(requestedTarget);
@@ -1764,6 +1813,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             showcaseQueue.finishCurrent();
         }
         requestedTarget = null;
+        requestedTargetName = null;
         observationSessionId = null;
         authorizedPlayerPose = null;
         playerArrival = null;
@@ -1788,8 +1838,18 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         status = "观察已结束：" + reason;
     }
 
+    private void recordObservationEvent(UUID playerId, String playerName, String stage, String source, String reason) {
+        LocalObservationEvents.Entry event = observationEvents.append(stage, source, playerId, playerName,
+                lastServer == null ? "singleplayer" : lastServer.address, currentWorldKey == null ? "" : currentWorldKey,
+                reason, System.currentTimeMillis());
+        LOGGER.info("[ObservationEvent] id={} player={} ({}) stage={} source={} server={} world={} reason={}",
+                event.id(), event.playerName(), event.playerId(), event.stage(), event.source(),
+                event.server(), event.world(), event.reason());
+    }
+
     private void resetOrbit(ClientPlayerEntity player) {
         terrainAvoidance.reset();
+        groundClearance.reset();
         terrainDecision = null;
         Vec3d direction = new Vec3d(player.getRotationVec(1).x, 0, player.getRotationVec(1).z).normalize();
         orbitCenter = player.getEntityPos().add(direction.multiply(settings.radius));
@@ -1922,25 +1982,50 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             subject = new CameraMotion.Subject("local:" + currentWorldKey,
                     new CameraMotion.Point(orbitCenter.x, orbitCenter.y, orbitCenter.z), 0, false, false, false, settings.radius);
         }
-        CameraMotion.Shot shot = sceneArrival == null ? cameraMotion.sample(subject,
-                new CameraMotion.Point(player.getX(), player.getY(), player.getZ()), settings)
+        CameraMotion.Point currentPosition = new CameraMotion.Point(player.getX(), player.getY(), player.getZ());
+        CameraMotion.Shot shot = sceneArrival == null ? cameraMotion.sample(subject, currentPosition, settings)
                 : new CameraMotion.Shot(sceneArrival.destination(), subject.center());
+        double plannedFloor = groundClearance.plannedFloorY(subject.id());
+        double currentRadius = Math.hypot(player.getX() - shot.lookAt().x(), player.getZ() - shot.lookAt().z());
+        double maximumDistance = Math.min(subject.player() ? 24 : 256, Math.max(settings.radius, currentRadius) + 16);
         if (sceneArrival == null && settings.autoDistance) {
-            double currentRadius = Math.hypot(player.getX() - shot.lookAt().x(), player.getZ() - shot.lookAt().z());
-            double maximumDistance = Math.min(subject.player() ? 24 : 256, Math.max(settings.radius, currentRadius) + 16);
-            shot = CameraMotion.widenForPitch(shot, new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
-                    terrainAvoidance.temporaryLift(), player.getEyePos().y - player.getY(), settings.maxPitchDegrees, maximumDistance);
+            double temporaryLift = terrainAvoidance.temporaryLift();
+            if (!subject.player() && Double.isFinite(plannedFloor)) {
+                temporaryLift = Math.max(temporaryLift, plannedFloor - shot.position().y());
+            }
+            shot = CameraMotion.widenForPitch(shot, currentPosition,
+                    temporaryLift, player.getEyePos().y - player.getY(), settings.maxPitchDegrees, maximumDistance);
         }
-        terrainDecision = terrainAvoidance.plan(subject.id(), shot,
-                new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
+        CameraTerrainWorld stepTerrain = new CameraTerrainWorld(player, worldExclusions(),
+                subject.player() ? 0 : settings.minGroundClearance);
+        // Forecast the original route before choosing avoidance angles, so low alternate rooftops do not attract the shot.
+        CameraMotion.Point groundTarget = groundClearance.plan(subject.id(), currentPosition, shot.position(), shot.position(),
+                new CameraMotion.Point(player.getVelocity().x, player.getVelocity().y, player.getVelocity().z),
+                settings.speed, sceneArrival == null && !subject.player()
+                        && (settings.mode == CameraMotion.Mode.ORBIT || settings.mode == CameraMotion.Mode.AUTO), stepTerrain, now);
+        if (groundTarget == null) {
+            stopMotion();
+            status = "等待脚下区块的真实地表高度";
+            return;
+        }
+        plannedFloor = groundClearance.plannedFloorY(subject.id());
+        if (sceneArrival == null && settings.autoDistance && Double.isFinite(plannedFloor)) {
+            shot = CameraMotion.widenForPitch(shot, currentPosition,
+                    Math.max(terrainAvoidance.temporaryLift(), plannedFloor - shot.position().y()),
+                    player.getEyePos().y - player.getY(), settings.maxPitchDegrees, maximumDistance);
+        }
+        terrainDecision = terrainAvoidance.plan(subject.id(), shot, currentPosition,
                 new CameraTerrainWorld(player, worldExclusions(), subject.player() ? 0 : settings.minGroundClearance),
-                now, sceneArrival != null);
+                now, sceneArrival != null, Double.isFinite(plannedFloor) ? plannedFloor : Double.NEGATIVE_INFINITY);
         if (terrainDecision.waiting()) {
             stopMotion();
             status = "等待已加载地形中的安全机位或绕行路线";
             return;
         }
         CameraMotion.Point safePosition = terrainDecision.destination();
+        if (Double.isFinite(plannedFloor)) {
+            safePosition = new CameraMotion.Point(safePosition.x(), Math.max(safePosition.y(), plannedFloor), safePosition.z());
+        }
         Vec3d desired = new Vec3d(safePosition.x(), safePosition.y(), safePosition.z());
         Vec3d lookAt = new Vec3d(shot.lookAt().x(), shot.lookAt().y(), shot.lookAt().z());
         if (!client.world.getWorldBorder().contains(desired)
@@ -1981,8 +2066,6 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             nextVelocity = nextVelocity.normalize().multiply(maxPerTick);
         }
         Vec3d nextPosition = player.getEntityPos().add(nextVelocity);
-        CameraTerrainWorld stepTerrain = new CameraTerrainWorld(player, worldExclusions(),
-                subject.player() ? 0 : settings.minGroundClearance);
         CameraMotion.Point safeStep = CameraGroundClearance.constrainStep(
                 new CameraMotion.Point(player.getX(), player.getY(), player.getZ()),
                 new CameraMotion.Point(nextPosition.x, nextPosition.y, nextPosition.z),
@@ -1992,6 +2075,8 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "等待脚下及前方区块的真实地表高度";
             return;
         }
+        boolean groundClimbing = safeStep.x() == player.getX() && safeStep.z() == player.getZ()
+                && safeStep.y() > player.getY() && nextVelocity.horizontalLengthSquared() > 0.000001;
         nextPosition = new Vec3d(safeStep.x(), safeStep.y(), safeStep.z());
         nextVelocity = nextPosition.subtract(player.getEntityPos());
         if (!client.world.getWorldBorder().contains(nextPosition)
@@ -2014,6 +2099,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
             status = "前方地形或区块尚不安全，已停止移动";
             return;
         }
+        cameraMotion.setTerrainPaused(groundClimbing);
         player.setVelocity(nextVelocity);
         lastSafeCameraPosition = new CameraMotion.Point(player.getX(), player.getY(), player.getZ());
         float turnLimit = (float) (settings.turnRateDegreesPerSecond / 20);
@@ -2060,17 +2146,20 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         return true;
     }
 
+    private void startLocalControl() throws IOException {
+        if (localControlServer != null) return;
+        localControlServer = new LocalControlServer(localControlSettings.port,
+                () -> onClientThread(this::readLocalControlState),
+                command -> onClientThread(() -> executeLocalControlCommand(command)));
+        localControlStartPort = localControlSettings.port;
+        LOGGER.info("Local control listening on 127.0.0.1:{}, preferred port {}",
+                localControlServer.address().getPort(), localControlStartPort);
+    }
+
     void openLocalControl() {
         MinecraftClient client = MinecraftClient.getInstance();
         try {
-            if (localControlServer == null) {
-                localControlServer = new LocalControlServer(localControlSettings.port,
-                        () -> onClientThread(this::readLocalControlState),
-                        command -> onClientThread(() -> executeLocalControlCommand(command)));
-                localControlStartPort = localControlSettings.port;
-                LOGGER.info("Local control listening on 127.0.0.1:{}, preferred port {}",
-                        localControlServer.address().getPort(), localControlStartPort);
-            }
+            startLocalControl();
             client.setScreen(null);
             Util.getOperatingSystem().open(localControlServer.address());
             status = "本地中控已打开：http://127.0.0.1:" + localControlServer.address().getPort() + "/"
@@ -2188,6 +2277,24 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
         observation.addProperty("deadline", !remoteAllowed || requestedTarget == null ? 0 : observeDeadline);
         observation.addProperty("arriving", playerArrival != null);
         state.add("observation", observation);
+        JsonObject eventHistory = new JsonObject();
+        eventHistory.addProperty("historyId", observationEvents.historyId());
+        JsonArray events = new JsonArray();
+        for (LocalObservationEvents.Entry entry : observationEvents.entries()) {
+            JsonObject event = new JsonObject();
+            event.addProperty("id", entry.id());
+            event.addProperty("timestamp", entry.timestamp());
+            event.addProperty("stage", entry.stage());
+            event.addProperty("source", entry.source());
+            event.addProperty("playerId", entry.playerId().toString());
+            event.addProperty("playerName", entry.playerName());
+            event.addProperty("server", entry.server());
+            event.addProperty("world", entry.world());
+            event.addProperty("reason", entry.reason());
+            events.add(event);
+        }
+        eventHistory.add("entries", events);
+        state.add("observationEvents", eventHistory);
         JsonObject motion = new JsonObject();
         motion.addProperty("radius", settings.radius);
         motion.addProperty("speed", settings.speed);
@@ -2630,6 +2737,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
                     settings.autoDistance = autoDistance;
                     if (poseChanged || replanFlight) {
                         terrainAvoidance.reset();
+                        groundClearance.reset();
                         terrainDecision = null;
                         if (sceneArrival != null && !sceneArrival.teleport() && activeScene != null) {
                             sceneArrival = SceneArrival.planFlight(
@@ -2746,6 +2854,7 @@ public final class BiliCraftDirectorClient implements ClientModInitializer {
     }
 
     private void stopMotion() {
+        cameraMotion.setTerrainPaused(true);
         ClientPlayerEntity player = MinecraftClient.getInstance().player;
         if (player != null) {
             player.setVelocity(Vec3d.ZERO);

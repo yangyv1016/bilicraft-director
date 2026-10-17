@@ -46,9 +46,15 @@ final class CameraMotion {
     private double anchorRadius;
     private double anchorHeight;
     private Point fixedPosition;
+    private boolean terrainPaused;
 
     void reset() {
         subjectId = null;
+        terrainPaused = false;
+    }
+
+    void setTerrainPaused(boolean paused) {
+        terrainPaused = paused;
     }
 
     Shot sample(Subject subject, Point cameraPosition, CameraSettings settings) {
@@ -72,7 +78,7 @@ final class CameraMotion {
         double radialX = Math.cos(baseAngle);
         double radialZ = Math.sin(baseAngle);
         // Phase advances only when the controller is actually driving, so menus and notice pauses do not jump shots.
-        phase += settings.speed / radius / 40;
+        if (!terrainPaused) phase += settings.speed / radius / 40;
         Point lookAt = center;
         Point position;
         Mode effectiveMode = mode;

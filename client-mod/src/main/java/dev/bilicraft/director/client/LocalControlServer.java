@@ -124,10 +124,17 @@ public final class LocalControlServer implements AutoCloseable {
                 case "/app.js" -> "app.js";
                 default -> null;
             };
+            boolean session = path.equals("/api/session");
             boolean state = path.equals("/api/state");
             boolean command = path.equals("/api/command");
-            if (resource == null && !state && !command) {
+            if (resource == null && !session && !state && !command) {
                 error(exchange, 404, "路径不存在");
+                return;
+            }
+            if (session && (!List.of("same-origin").equals(exchange.getRequestHeaders().get("Sec-Fetch-Site"))
+                    || !List.of("same-origin").equals(exchange.getRequestHeaders().get("Sec-Fetch-Mode"))
+                    || !List.of("control").equals(exchange.getRequestHeaders().get("X-BiliCraft-Client")))) {
+                error(exchange, 403, "请求来源无效");
                 return;
             }
             if (state || command) {
@@ -142,6 +149,10 @@ public final class LocalControlServer implements AutoCloseable {
             if (!exchange.getRequestMethod().equals(method)) {
                 headers.set("Allow", method);
                 error(exchange, 405, "请求方法不支持");
+                return;
+            }
+            if (session) {
+                respond(exchange, 200, JSON, ("{\"token\":\"" + address.getFragment() + "\"}").getBytes(StandardCharsets.UTF_8));
                 return;
             }
             if (resource != null) {

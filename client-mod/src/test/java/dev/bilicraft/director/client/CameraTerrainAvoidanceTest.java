@@ -18,7 +18,7 @@ class CameraTerrainAvoidanceTest {
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
 
         CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended,
-                new CameraMotion.Point(10, 122, 0), terrain, 1_000, false);
+                new CameraMotion.Point(10, 122, 0), terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
         assertEquals(intended.position(), decision.destination());
         assertFalse(decision.waiting());
@@ -33,13 +33,53 @@ class CameraTerrainAvoidanceTest {
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         CameraMotion.Point current = new CameraMotion.Point(-12, 122, 0);
 
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, true);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, true, Double.NEGATIVE_INFINITY);
 
         assertFalse(decision.waiting());
         assertEquals(4, distance(current, decision.destination()), 1.0E-9);
         assertEquals(122, decision.destination().y());
         assertNotEquals(intended.position(), decision.destination());
         assertEquals(intended.position(), planner.landing("scene", intended, terrain));
+    }
+
+    @Test
+    void retainedGroundAltitudeIsAppliedBeforeNormalizingTheLocalWaypoint() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+        CameraMotion.Point current = new CameraMotion.Point(8, 200, 0);
+
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false, 200);
+
+        assertFalse(decision.waiting());
+        assertEquals(new CameraMotion.Point(12, 200, 0), decision.destination(),
+                "the obsolete low scene Y must not reduce a four-block horizontal leg");
+        assertEquals(4, distance(current, decision.destination()), 1.0E-9);
+        assertEquals(122, intended.position().y(), "the retained floor does not overwrite the configured scene Y");
+    }
+
+    @Test
+    void aRetainedGroundFloorValidatesTheViewAtTheActualRaisedHeight() {
+        ProbeTerrain terrain = new ProbeTerrain();
+        terrain.view = (point, lookAt) -> point.y() >= 200 && Math.abs(point.z()) < 1 ? BLOCKED : CLEAR;
+        CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
+        CameraMotion.Point current = new CameraMotion.Point(8, 200, 0);
+        assertEquals(CLEAR, terrain.view(intended.position(), center));
+        assertEquals(BLOCKED, terrain.view(intended.position().offset(0, 78, 0), center));
+
+        for (long now = 1_000; now <= 1_500; now += 250) {
+            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, now, false, 200);
+
+            assertFalse(decision.waiting());
+            assertNotNull(planner.resolvedDestination());
+            assertEquals(200, planner.resolvedDestination().y());
+            assertTrue(Math.abs(planner.resolvedDestination().z()) >= 1,
+                    "the raised shot must choose a side with a clear view instead of trusting its old low view");
+            assertEquals(CLEAR, terrain.view(planner.resolvedDestination(), center));
+            assertEquals(CLEAR, terrain.view(decision.destination(), center));
+            assertEquals(78, planner.temporaryLift(), "replanning must not add the same retained floor twice");
+            current = decision.destination();
+        }
+        assertEquals(122, intended.position().y());
     }
 
     @Test
@@ -54,7 +94,7 @@ class CameraTerrainAvoidanceTest {
         assertEquals(122, landing.y());
         assertTrue(Math.abs(landing.z()) > 1);
         assertEquals(12, Math.hypot(landing.x(), landing.z()), 1.0E-9);
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, landing, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, landing, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
         assertFalse(decision.waiting());
         assertEquals(122, decision.destination().y());
     }
@@ -76,7 +116,7 @@ class CameraTerrainAvoidanceTest {
 
         for (int step = 0; step < 20 && distance(current, intended.position()) > 0.01; step++) {
             CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current,
-                    terrain, 1_000 + step * 250L, true);
+                    terrain, 1_000 + step * 250L, true, Double.NEGATIVE_INFINITY);
             assertFalse(decision.waiting());
             assertEquals(122, decision.destination().y(), "a horizontal exit must not trigger unnecessary climbing");
             assertTrue(distance(current, decision.destination()) <= 4 + 1.0E-9);
@@ -93,11 +133,11 @@ class CameraTerrainAvoidanceTest {
         terrain.path = (from, to) -> to.z() < -0.01 ? CLEAR : BLOCKED;
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         CameraMotion.Point current = new CameraMotion.Point(8, 122, 0);
-        CameraTerrainAvoidance.Decision first = planner.plan("scene", intended, current, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision first = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
         assertTrue(first.destination().z() < 0);
 
         terrain.path = (from, to) -> Math.abs(to.z()) > 0.01 ? CLEAR : BLOCKED;
-        CameraTerrainAvoidance.Decision next = planner.plan("scene", intended, current, terrain, 1_250, false);
+        CameraTerrainAvoidance.Decision next = planner.plan("scene", intended, current, terrain, 1_250, false, Double.NEGATIVE_INFINITY);
 
         assertFalse(next.waiting());
         assertTrue(next.destination().z() < 0, "minor clearance changes must not alternate left and right");
@@ -115,7 +155,7 @@ class CameraTerrainAvoidanceTest {
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         planner.adoptLanding("scene", lowBaseline, current);
 
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", lowBaseline, current, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", lowBaseline, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
         assertFalse(decision.waiting());
         assertEquals(new CameraMotion.Point(12, 296, 0), planner.resolvedDestination());
@@ -133,7 +173,7 @@ class CameraTerrainAvoidanceTest {
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
 
         CameraTerrainAvoidance.Decision decision = planner.plan("scene", lowBaseline,
-                new CameraMotion.Point(12, 276, 0), terrain, 1_000, false);
+                new CameraMotion.Point(12, 276, 0), terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
         assertFalse(decision.waiting());
         assertTrue(planner.resolvedDestination().y() >= 296);
@@ -151,7 +191,7 @@ class CameraTerrainAvoidanceTest {
             CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
 
             CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended,
-                    new CameraMotion.Point(12, 276, 0), terrain, 1_000, false);
+                    new CameraMotion.Point(12, 276, 0), terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
             assertTrue(decision.waiting());
             assertNull(planner.resolvedDestination());
@@ -165,7 +205,7 @@ class CameraTerrainAvoidanceTest {
         CameraMotion.Point current = intended.position().offset(0, -0.005, 0);
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
 
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
         assertFalse(decision.waiting());
         assertEquals(intended.position(), decision.destination());
@@ -182,7 +222,7 @@ class CameraTerrainAvoidanceTest {
             CameraMotion.Point current = intended.position().offset(0, -0.005, 0);
             CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
 
-            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false);
+            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
             assertTrue(decision.waiting(), pathState.name());
             assertEquals(current, decision.destination());
@@ -212,20 +252,20 @@ class CameraTerrainAvoidanceTest {
         terrain.space = point -> point.y() >= 128.3 ? CLEAR : BLOCKED;
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         CameraMotion.Point current = new CameraMotion.Point(12, 128.5, 0);
-        CameraTerrainAvoidance.Decision raised = planner.plan("scene", intended, current, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision raised = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
         double raisedY = raised.destination().y();
         assertTrue(raisedY >= 128.3);
 
         terrain.space = point -> CLEAR;
         current = raised.destination();
         for (long now = 1_250; now < 3_250; now += 250) {
-            CameraTerrainAvoidance.Decision held = planner.plan("scene", intended, current, terrain, now, false);
+            CameraTerrainAvoidance.Decision held = planner.plan("scene", intended, current, terrain, now, false, Double.NEGATIVE_INFINITY);
             assertEquals(raisedY, held.destination().y(), "briefly clear terrain must not cause immediate descent");
             current = held.destination();
         }
 
         for (long now = 3_250; now <= 18_250; now += 250) {
-            CameraTerrainAvoidance.Decision recovering = planner.plan("scene", intended, current, terrain, now, false);
+            CameraTerrainAvoidance.Decision recovering = planner.plan("scene", intended, current, terrain, now, false, Double.NEGATIVE_INFINITY);
             assertFalse(recovering.waiting());
             assertTrue(recovering.destination().y() <= current.y());
             assertTrue(current.y() - recovering.destination().y() <= 0.125 + 1.0E-9,
@@ -248,13 +288,13 @@ class CameraTerrainAvoidanceTest {
         assertTrue(landing.y() >= 128.3);
 
         terrain.space = point -> CLEAR;
-        CameraTerrainAvoidance.Decision first = planner.plan("scene", intended, landing, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision first = planner.plan("scene", intended, landing, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
         assertFalse(first.waiting());
         assertEquals(landing.y(), first.destination().y());
         assertEquals(landing.y() - 122, planner.temporaryLift());
-        CameraTerrainAvoidance.Decision held = planner.plan("scene", intended, landing, terrain, 2_999, false);
+        CameraTerrainAvoidance.Decision held = planner.plan("scene", intended, landing, terrain, 2_999, false, Double.NEGATIVE_INFINITY);
         assertEquals(landing.y(), held.destination().y());
-        CameraTerrainAvoidance.Decision recovering = planner.plan("scene", intended, landing, terrain, 3_249, false);
+        CameraTerrainAvoidance.Decision recovering = planner.plan("scene", intended, landing, terrain, 3_249, false, Double.NEGATIVE_INFINITY);
         assertEquals(landing.y() - 0.125, recovering.destination().y(), 1.0E-9);
     }
 
@@ -268,7 +308,7 @@ class CameraTerrainAvoidanceTest {
             CameraMotion.Point current = new CameraMotion.Point(10, 122, 0);
 
             assertNull(planner.landing("scene", intended, terrain));
-            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false);
+            CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
             assertTrue(decision.waiting());
             assertEquals(current, decision.destination());
@@ -282,7 +322,7 @@ class CameraTerrainAvoidanceTest {
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         CameraMotion.Point current = new CameraMotion.Point(8, 122, 0);
 
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, true);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, true, Double.NEGATIVE_INFINITY);
 
         assertTrue(decision.waiting());
         assertEquals(current, decision.destination());
@@ -299,7 +339,7 @@ class CameraTerrainAvoidanceTest {
         CameraMotion.Point current = new CameraMotion.Point(0, 122, 0);
         assertNull(planner.landing("scene", intended, terrain));
 
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, true);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, true, Double.NEGATIVE_INFINITY);
 
         assertFalse(decision.waiting());
         assertEquals(4, distance(current, decision.destination()), 1.0E-9);
@@ -317,7 +357,7 @@ class CameraTerrainAvoidanceTest {
         CameraMotion.Point current = new CameraMotion.Point(8, 122, 0);
 
         assertNull(planner.landing("scene", intended, terrain));
-        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision decision = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
 
         assertTrue(decision.waiting());
         assertEquals(current, decision.destination());
@@ -329,14 +369,14 @@ class CameraTerrainAvoidanceTest {
         terrain.view = (point, lookAt) -> BLOCKED;
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         CameraMotion.Point current = new CameraMotion.Point(8, 122, 0);
-        CameraTerrainAvoidance.Decision first = planner.plan("scene", intended, current, terrain, 1_000, false);
+        CameraTerrainAvoidance.Decision first = planner.plan("scene", intended, current, terrain, 1_000, false, Double.NEGATIVE_INFINITY);
         int firstQueries = terrain.queries;
 
         assertTrue(first.waiting());
         assertTrue(firstQueries > 0 && firstQueries <= 512);
-        assertEquals(first, planner.plan("scene", intended, current, terrain, 1_249, false));
+        assertEquals(first, planner.plan("scene", intended, current, terrain, 1_249, false, Double.NEGATIVE_INFINITY));
         assertEquals(firstQueries, terrain.queries, "render/tick calls inside the interval must not rescan terrain");
-        planner.plan("scene", intended, current, terrain, 1_250, false);
+        planner.plan("scene", intended, current, terrain, 1_250, false, Double.NEGATIVE_INFINITY);
         assertTrue(terrain.queries > firstQueries);
         assertTrue(terrain.queries - firstQueries <= 512);
     }
@@ -347,13 +387,13 @@ class CameraTerrainAvoidanceTest {
         terrain.space = point -> point.y() >= 128.3 ? CLEAR : BLOCKED;
         CameraTerrainAvoidance planner = new CameraTerrainAvoidance();
         CameraTerrainAvoidance.Decision first = planner.plan("old-scene", intended,
-                new CameraMotion.Point(12, 128.5, 0), terrain, 1_000, false);
+                new CameraMotion.Point(12, 128.5, 0), terrain, 1_000, false, Double.NEGATIVE_INFINITY);
         assertTrue(first.destination().y() >= 128.3);
 
         terrain.space = point -> CLEAR;
         CameraMotion.Shot nextShot = new CameraMotion.Shot(new CameraMotion.Point(12, 75, 0), center);
         CameraTerrainAvoidance.Decision next = planner.plan("new-scene", nextShot,
-                nextShot.position(), terrain, 1_001, false);
+                nextShot.position(), terrain, 1_001, false, Double.NEGATIVE_INFINITY);
 
         assertFalse(next.waiting());
         assertEquals(nextShot.position(), next.destination());
@@ -370,7 +410,7 @@ class CameraTerrainAvoidanceTest {
             CameraMotion.Shot playerShot = new CameraMotion.Shot(new CameraMotion.Point(12, playerCenter.y() + 4, 0), playerCenter);
 
             CameraTerrainAvoidance.Decision decision = planner.plan("player", playerShot,
-                    playerShot.position(), terrain, 1_000 + step * 250L, false);
+                    playerShot.position(), terrain, 1_000 + step * 250L, false, Double.NEGATIVE_INFINITY);
 
             assertEquals(playerY + 1.2 + 4, decision.destination().y(), 1.0E-9);
             assertFalse(decision.waiting());
